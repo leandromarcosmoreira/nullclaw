@@ -261,17 +261,9 @@ pub const LarkChannel = struct {
         var content_buf: [4096]u8 = undefined;
         var content_fbs = std.io.fixedBufferStream(&content_buf);
         const cw = content_fbs.writer();
-        try cw.writeAll("{\"text\":\"");
-        for (text) |c| {
-            switch (c) {
-                '"' => try cw.writeAll("\\\""),
-                '\\' => try cw.writeAll("\\\\"),
-                '\n' => try cw.writeAll("\\n"),
-                '\r' => try cw.writeAll("\\r"),
-                else => try cw.writeByte(c),
-            }
-        }
-        try cw.writeAll("\"}");
+        try cw.writeAll("{\"text\":");
+        try root.appendJsonStringW(cw, text);
+        try cw.writeAll("}");
         const content_json = content_fbs.getWritten();
 
         // Build outer body JSON
@@ -280,16 +272,10 @@ pub const LarkChannel = struct {
         const w = fbs.writer();
         try w.writeAll("{\"receive_id\":\"");
         try w.writeAll(recipient);
-        try w.writeAll("\",\"msg_type\":\"text\",\"content\":\"");
+        try w.writeAll("\",\"msg_type\":\"text\",\"content\":");
         // Escape the content JSON string for embedding
-        for (content_json) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                else => try w.writeByte(c),
-            }
-        }
-        try w.writeAll("\"}");
+        try root.appendJsonStringW(w, content_json);
+        try w.writeAll("}");
         const body = fbs.getWritten();
 
         // Build auth header

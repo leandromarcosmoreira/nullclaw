@@ -1,6 +1,8 @@
 const std = @import("std");
 const yc = @import("nullclaw");
 
+const log = std.log.scoped(.main);
+
 const Command = enum {
     agent,
     gateway,
@@ -135,7 +137,7 @@ fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         std.process.exit(1);
     };
 
-    try yc.daemon.run(allocator, &cfg);
+    try yc.daemon.run(allocator, &cfg, host, port);
 }
 
 // ── Service ──────────────────────────────────────────────────────
@@ -658,7 +660,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--user") and i + 1 < args.len) {
                 i += 1;
-                user_list.append(allocator, args[i]) catch {};
+                user_list.append(allocator, args[i]) catch |err| log.err("failed to append user: {}", .{err});
             }
         }
     }
@@ -704,6 +706,8 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .browser_enabled = config.browser.enabled,
         .screenshot_enabled = true,
         .mcp_tools = mcp_tools,
+        .agents = config.agents,
+        .fallback_api_key = config.api_key,
     }) catch &.{};
     defer if (tools.len > 0) allocator.free(tools);
 
@@ -782,7 +786,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
                 msg.content,
             ) catch |err| {
                 std.debug.print("  Agent error: {}\n", .{err});
-                tg.sendMessage(msg.sender, "Sorry, I encountered an error.") catch {};
+                tg.sendMessage(msg.sender, "Sorry, I encountered an error.") catch |send_err| log.err("failed to send error reply: {}", .{send_err});
                 continue;
             };
             defer allocator.free(reply);

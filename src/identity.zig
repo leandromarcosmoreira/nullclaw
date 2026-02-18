@@ -385,7 +385,7 @@ pub fn isAieosConfigured(format: []const u8, aieos_path: ?[]const u8, aieos_inli
 
 test "parse minimal AIEOS identity" {
     // Use page_allocator since parsed identity is long-lived (no deinit).
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const json =
         \\{"identity":{"names":{"first":"Nova"}}}
     ;
@@ -395,7 +395,7 @@ test "parse minimal AIEOS identity" {
 }
 
 test "parse full AIEOS identity" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const json =
         \\{
         \\  "identity": {
@@ -443,7 +443,7 @@ test "parse full AIEOS identity" {
 }
 
 test "parse empty JSON object" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const identity = try parseAieosJson(alloc, "{}");
     try std.testing.expect(identity.identity == null);
     try std.testing.expect(identity.psychology == null);
@@ -486,7 +486,7 @@ test "isAieosConfigured" {
 // ── Additional identity tests ───────────────────────────────────
 
 test "parse AIEOS with physicality section" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const json =
         \\{"physicality":{"appearance":"Tall with glasses","avatar_description":"A friendly robot"}}
     ;
@@ -497,7 +497,7 @@ test "parse AIEOS with physicality section" {
 }
 
 test "parse AIEOS with history section" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const json =
         \\{"history":{"origin_story":"Born in a lab","occupation":"AI Assistant"}}
     ;
@@ -508,7 +508,7 @@ test "parse AIEOS with history section" {
 }
 
 test "parse AIEOS with interests section" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const json =
         \\{"interests":{"lifestyle":"minimalist","hobbies":["reading","coding"]}}
     ;
@@ -519,13 +519,13 @@ test "parse AIEOS with interests section" {
 }
 
 test "parse AIEOS invalid JSON returns error" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const result = parseAieosJson(alloc, "not json");
     try std.testing.expectError(error.SyntaxError, result);
 }
 
 test "parse AIEOS non-object JSON returns error" {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.smp_allocator;
     const result = parseAieosJson(alloc, "[1,2,3]");
     try std.testing.expectError(error.InvalidIdentityJson, result);
 }

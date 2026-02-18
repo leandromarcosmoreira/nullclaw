@@ -5,6 +5,11 @@
 //!   hardware, health, heartbeat, memory, observability,
 //!   onboard, providers, security, skills, tools
 
+// Shared utilities
+pub const json_util = @import("json_util.zig");
+pub const http_util = @import("http_util.zig");
+pub const net_security = @import("net_security.zig");
+
 // Phase 1: Core
 pub const bus = @import("bus.zig");
 pub const config = @import("config.zig");
@@ -41,6 +46,7 @@ pub const runtime = @import("runtime.zig");
 
 // Phase 4b: MCP (Model Context Protocol)
 pub const mcp = @import("mcp.zig");
+pub const subagent = @import("subagent.zig");
 
 // Phase 5: Hardware & Integrations
 pub const hardware = @import("hardware.zig");

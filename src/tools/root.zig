@@ -37,6 +37,7 @@ pub const schema = @import("schema.zig");
 pub const web_search = @import("web_search.zig");
 pub const web_fetch = @import("web_fetch.zig");
 pub const file_append = @import("file_append.zig");
+pub const spawn = @import("spawn.zig");
 
 // ── Core types ──────────────────────────────────────────────────────
 
@@ -145,6 +146,10 @@ pub fn allTools(
         browser_open_domains: ?[]const []const u8 = null,
         hardware_boards: ?[]const []const u8 = null,
         mcp_tools: ?[]const Tool = null,
+        agents: ?[]const @import("../config.zig").NamedAgentConfig = null,
+        fallback_api_key: ?[]const u8 = null,
+        delegate_depth: u32 = 0,
+        subagent_manager: ?*@import("../subagent.zig").SubagentManager = null,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -195,12 +200,21 @@ pub fn allTools(
 
     // Delegate and schedule tools
     const dlt = try allocator.create(delegate.DelegateTool);
-    dlt.* = .{};
+    dlt.* = .{
+        .agents = opts.agents orelse &.{},
+        .fallback_api_key = opts.fallback_api_key,
+        .depth = opts.delegate_depth,
+    };
     try list.append(allocator, dlt.tool());
 
     const scht = try allocator.create(schedule.ScheduleTool);
     scht.* = .{};
     try list.append(allocator, scht.tool());
+
+    // Spawn tool (async subagent)
+    const sp = try allocator.create(spawn.SpawnTool);
+    sp.* = .{ .manager = opts.subagent_manager };
+    try list.append(allocator, sp.tool());
 
     if (opts.http_enabled) {
         const ht = try allocator.create(http_request.HttpRequestTool);
@@ -247,6 +261,47 @@ pub fn allTools(
         for (mt) |t| {
             try list.append(allocator, t);
         }
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
+/// Create restricted tool set for subagents.
+/// Includes: shell, file_read, file_write, file_edit, git, http (if enabled).
+/// Excludes: message, spawn, delegate, schedule, memory, composio, browser —
+/// to prevent infinite loops and cross-channel side effects.
+pub fn subagentTools(
+    allocator: std.mem.Allocator,
+    workspace_dir: []const u8,
+    opts: struct { http_enabled: bool = false },
+) ![]Tool {
+    var list: std.ArrayList(Tool) = .{};
+    errdefer list.deinit(allocator);
+
+    const st = try allocator.create(shell.ShellTool);
+    st.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, st.tool());
+
+    const ft = try allocator.create(file_read.FileReadTool);
+    ft.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, ft.tool());
+
+    const wt = try allocator.create(file_write.FileWriteTool);
+    wt.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, wt.tool());
+
+    const et = try allocator.create(file_edit.FileEditTool);
+    et.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, et.tool());
+
+    const gt = try allocator.create(git.GitTool);
+    gt.* = .{ .workspace_dir = workspace_dir };
+    try list.append(allocator, gt.tool());
+
+    if (opts.http_enabled) {
+        const ht = try allocator.create(http_request.HttpRequestTool);
+        ht.* = .{};
+        try list.append(allocator, ht.tool());
     }
 
     return list.toOwnedSlice(allocator);
@@ -356,14 +411,15 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[8].ptr))));
         std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[9].ptr))));
         std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
-        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[11].ptr))));
-        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[13].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
     // + memory_store + memory_recall + memory_forget + delegate + schedule
-    // + http_request + browser = 13
-    try std.testing.expectEqual(@as(usize, 13), tools.len);
+    // + spawn + http_request + browser = 14
+    try std.testing.expectEqual(@as(usize, 14), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -383,11 +439,12 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[8].ptr))));
         std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[9].ptr))));
         std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[11].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
-    // + memory_store + memory_recall + memory_forget + delegate + schedule = 11
-    try std.testing.expectEqual(@as(usize, 11), tools.len);
+    // + memory_store + memory_recall + memory_forget + delegate + schedule + spawn = 12
+    try std.testing.expectEqual(@as(usize, 12), tools.len);
 }
 
 test {

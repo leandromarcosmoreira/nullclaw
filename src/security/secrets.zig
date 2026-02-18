@@ -1,6 +1,7 @@
 const std = @import("std");
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+const log = std.log.scoped(.secrets);
 
 /// Length of the random encryption key in bytes (256-bit).
 pub const KEY_LEN: usize = 32;
@@ -221,7 +222,9 @@ pub const SecretStore = struct {
 
             // Ensure parent dir exists
             if (std.fs.path.dirname(path)) |parent| {
-                std.fs.cwd().makePath(parent) catch {};
+                std.fs.cwd().makePath(parent) catch |err| {
+                    log.err("failed to create parent dir {s}: {}", .{ parent, err });
+                };
             }
 
             const file = std.fs.cwd().createFile(path, .{}) catch return error.KeyWriteFailed;
@@ -230,7 +233,9 @@ pub const SecretStore = struct {
 
             // Set restrictive permissions (Unix: 0600, owner-only)
             if (@import("builtin").os.tag != .windows) {
-                file.chmod(0o600) catch {};
+                file.chmod(0o600) catch |err| {
+                    log.err("failed to set 0600 permissions on {s}: {}", .{ path, err });
+                };
             }
 
             return key;

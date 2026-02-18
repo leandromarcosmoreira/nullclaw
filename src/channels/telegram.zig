@@ -1,6 +1,8 @@
 const std = @import("std");
 const root = @import("root.zig");
 
+const log = std.log.scoped(.telegram);
+
 // ════════════════════════════════════════════════════════════════════════════
 // Attachment Types
 // ════════════════════════════════════════════════════════════════════════════
@@ -281,7 +283,7 @@ pub const TelegramChannel = struct {
         body_list.appendSlice(self.allocator, chat_id) catch return;
         body_list.appendSlice(self.allocator, ",\"action\":\"typing\"}") catch return;
 
-        const resp = curlPost(self.allocator, url, body_list.items, null) catch return;
+        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{}) catch return;
         self.allocator.free(resp);
     }
 
@@ -306,11 +308,11 @@ pub const TelegramChannel = struct {
 
         try html_body.appendSlice(self.allocator, "{\"chat_id\":");
         try html_body.appendSlice(self.allocator, chat_id);
-        try html_body.appendSlice(self.allocator, ",\"text\":\"");
-        try appendJsonEscaped(&html_body, self.allocator, html_text);
-        try html_body.appendSlice(self.allocator, "\",\"parse_mode\":\"HTML\"}");
+        try html_body.appendSlice(self.allocator, ",\"text\":");
+        try root.json_util.appendJsonString(&html_body, self.allocator, html_text);
+        try html_body.appendSlice(self.allocator, ",\"parse_mode\":\"HTML\"}");
 
-        const resp = curlPost(self.allocator, url, html_body.items, null) catch {
+        const resp = root.http_util.curlPost(self.allocator, url, html_body.items, &.{}) catch {
             // Network error — fall through to plain send
             try self.sendChunkPlain(chat_id, text);
             return;
@@ -333,11 +335,11 @@ pub const TelegramChannel = struct {
 
         try body_list.appendSlice(self.allocator, "{\"chat_id\":");
         try body_list.appendSlice(self.allocator, chat_id);
-        try body_list.appendSlice(self.allocator, ",\"text\":\"");
-        try appendJsonEscaped(&body_list, self.allocator, text);
-        try body_list.appendSlice(self.allocator, "\"}");
+        try body_list.appendSlice(self.allocator, ",\"text\":");
+        try root.json_util.appendJsonString(&body_list, self.allocator, text);
+        try body_list.appendSlice(self.allocator, "}");
 
-        _ = try curlPost(self.allocator, url, body_list.items, null);
+        _ = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
     }
 
     // ── Media sending ───────────────────────────────────────────────
@@ -439,8 +441,8 @@ pub const TelegramChannel = struct {
 
         // Send attachments
         for (parsed.attachments) |att| {
-            self.sendMediaMultipart(chat_id, self.allocator, att.kind, att.target, att.caption) catch {
-                // Log failure but continue with other attachments
+            self.sendMediaMultipart(chat_id, self.allocator, att.kind, att.target, att.caption) catch |err| {
+                log.err("sendMediaMultipart failed: {}", .{err});
                 continue;
             };
         }
@@ -457,11 +459,11 @@ pub const TelegramChannel = struct {
 
         try body_list.appendSlice(self.allocator, "{\"chat_id\":");
         try body_list.appendSlice(self.allocator, chat_id);
-        try body_list.appendSlice(self.allocator, ",\"text\":\"");
-        try appendJsonEscaped(&body_list, self.allocator, text);
-        try body_list.appendSlice(self.allocator, "\"}");
+        try body_list.appendSlice(self.allocator, ",\"text\":");
+        try root.json_util.appendJsonString(&body_list, self.allocator, text);
+        try body_list.appendSlice(self.allocator, "}");
 
-        _ = try curlPost(self.allocator, url, body_list.items, null);
+        _ = try root.http_util.curlPost(self.allocator, url, body_list.items, &.{});
     }
 
     /// Poll for updates using long-polling (getUpdates) via curl.
@@ -476,7 +478,7 @@ pub const TelegramChannel = struct {
         try fbs.writer().print("{{\"offset\":{d},\"timeout\":30,\"allowed_updates\":[\"message\"]}}", .{self.last_update_id});
         const body = fbs.getWritten();
 
-        const resp_body = try curlPost(allocator, url, body, null);
+        const resp_body = try root.http_util.curlPost(allocator, url, body, &.{});
 
         // Parse JSON response to extract messages
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp_body, .{}) catch return &.{};
@@ -577,70 +579,6 @@ pub const TelegramChannel = struct {
         return .{ .ptr = @ptrCast(self), .vtable = &vtable };
     }
 };
-
-// ════════════════════════════════════════════════════════════════════════════
-// Helpers
-// ════════════════════════════════════════════════════════════════════════════
-
-/// Append JSON-escaped text to an ArrayList.
-fn appendJsonEscaped(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
-    for (text) |c| {
-        switch (c) {
-            '"' => try list.appendSlice(allocator, "\\\""),
-            '\\' => try list.appendSlice(allocator, "\\\\"),
-            '\n' => try list.appendSlice(allocator, "\\n"),
-            '\r' => try list.appendSlice(allocator, "\\r"),
-            '\t' => try list.appendSlice(allocator, "\\t"),
-            else => try list.append(allocator, c),
-        }
-    }
-}
-
-/// HTTP POST via curl subprocess (avoids Zig 0.15 std.http.Client segfaults).
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_header: ?[]const u8) ![]u8 {
-    var argv_buf: [16][]const u8 = undefined;
-    var argc: usize = 0;
-
-    argv_buf[argc] = "curl";
-    argc += 1;
-    argv_buf[argc] = "-s";
-    argc += 1;
-    argv_buf[argc] = "-X";
-    argc += 1;
-    argv_buf[argc] = "POST";
-    argc += 1;
-    argv_buf[argc] = "-H";
-    argc += 1;
-    argv_buf[argc] = "Content-Type: application/json";
-    argc += 1;
-
-    if (auth_header) |hdr| {
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = hdr;
-        argc += 1;
-    }
-
-    argv_buf[argc] = "-d";
-    argc += 1;
-    argv_buf[argc] = body;
-    argc += 1;
-    argv_buf[argc] = url;
-    argc += 1;
-
-    var child = std.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-    return stdout;
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Markdown → Telegram HTML Conversion

@@ -14,6 +14,8 @@
 
 const std = @import("std");
 
+const log = std.log.scoped(.schema);
+
 /// Schema cleaning strategies for different LLM providers.
 pub const CleaningStrategy = enum {
     /// Gemini (Google AI / Vertex AI) — most restrictive.
@@ -499,7 +501,7 @@ fn preserveMeta(allocator: std.mem.Allocator, source: *const std.json.ObjectMap,
     var obj = target.object;
     for (&SCHEMA_META_KEYS) |key| {
         if (source.get(key)) |val| {
-            obj.put(key, val) catch {};
+            obj.put(key, val) catch |err| log.err("preserveMeta: failed to put key {s}: {}", .{ key, err });
         }
     }
     _ = allocator;

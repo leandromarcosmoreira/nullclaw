@@ -197,7 +197,7 @@ pub const OpenAiProvider = struct {
         const auth_hdr = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{api_key});
         defer allocator.free(auth_hdr);
 
-        const resp_body = curlPost(allocator, BASE_URL, body, auth_hdr) catch return error.OpenAiApiError;
+        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{auth_hdr}) catch return error.OpenAiApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -219,7 +219,7 @@ pub const OpenAiProvider = struct {
         const auth_hdr = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{api_key});
         defer allocator.free(auth_hdr);
 
-        const resp_body = curlPost(allocator, BASE_URL, body, auth_hdr) catch return error.OpenAiApiError;
+        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{auth_hdr}) catch return error.OpenAiApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -254,10 +254,10 @@ pub const OpenAiProvider = struct {
             try buf.appendSlice(allocator, "{\"role\":\"");
             try buf.appendSlice(allocator, msg.role.toSlice());
             try buf.appendSlice(allocator, "\",\"content\":");
-            try appendJsonString(&buf, allocator, msg.content);
+            try root.appendJsonString(&buf, allocator, msg.content);
             if (msg.tool_call_id) |tc_id| {
                 try buf.appendSlice(allocator, ",\"tool_call_id\":");
-                try appendJsonString(&buf, allocator, tc_id);
+                try root.appendJsonString(&buf, allocator, tc_id);
             }
             try buf.append(allocator, '}');
         }
@@ -295,10 +295,10 @@ pub const OpenAiProvider = struct {
             try buf.appendSlice(allocator, "{\"role\":\"");
             try buf.appendSlice(allocator, msg.role.toSlice());
             try buf.appendSlice(allocator, "\",\"content\":");
-            try appendJsonString(&buf, allocator, msg.content);
+            try root.appendJsonString(&buf, allocator, msg.content);
             if (msg.tool_call_id) |tc_id| {
                 try buf.appendSlice(allocator, ",\"tool_call_id\":");
-                try appendJsonString(&buf, allocator, tc_id);
+                try root.appendJsonString(&buf, allocator, tc_id);
             }
             try buf.append(allocator, '}');
         }
@@ -317,41 +317,6 @@ pub const OpenAiProvider = struct {
         return try buf.toOwnedSlice(allocator);
     }
 };
-
-fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-    try buf.append(allocator, '"');
-}
-
-/// HTTP POST via curl subprocess.
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8) ![]u8 {
-    var child = std.process.Child.init(&.{
-        "curl", "-s",                             "-X", "POST",
-        "-H",   "Content-Type: application/json", "-H", auth_hdr,
-        "-d",   body,                             url,
-    }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-    return stdout;
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Tests

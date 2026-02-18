@@ -347,9 +347,12 @@ pub const GeminiProvider = struct {
         defer allocator.free(body);
 
         const resp_body = if (auth.isApiKey())
-            curlPost(allocator, url, body, null) catch return error.GeminiApiError
-        else
-            curlPost(allocator, url, body, auth.credential()) catch return error.GeminiApiError;
+            root.curlPost(allocator, url, body, &.{}) catch return error.GeminiApiError
+        else blk: {
+            var auth_hdr_buf: [512]u8 = undefined;
+            const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
+            break :blk root.curlPost(allocator, url, body, &.{auth_hdr}) catch return error.GeminiApiError;
+        };
         defer allocator.free(resp_body);
 
         return parseResponse(allocator, resp_body);
@@ -372,9 +375,12 @@ pub const GeminiProvider = struct {
         defer allocator.free(body);
 
         const resp_body = if (auth.isApiKey())
-            curlPost(allocator, url, body, null) catch return error.GeminiApiError
-        else
-            curlPost(allocator, url, body, auth.credential()) catch return error.GeminiApiError;
+            root.curlPost(allocator, url, body, &.{}) catch return error.GeminiApiError
+        else blk: {
+            var auth_hdr_buf: [512]u8 = undefined;
+            const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
+            break :blk root.curlPost(allocator, url, body, &.{auth_hdr}) catch return error.GeminiApiError;
+        };
         defer allocator.free(resp_body);
 
         const text = try parseResponse(allocator, resp_body);
@@ -426,14 +432,14 @@ fn buildChatRequestBody(
         try buf.appendSlice(allocator, "{\"role\":\"");
         try buf.appendSlice(allocator, role_str);
         try buf.appendSlice(allocator, "\",\"parts\":[{\"text\":");
-        try appendJsonString(&buf, allocator, msg.content);
+        try root.appendJsonString(&buf, allocator, msg.content);
         try buf.appendSlice(allocator, "}]}");
     }
     try buf.append(allocator, ']');
 
     if (system_prompt) |sys| {
         try buf.appendSlice(allocator, ",\"system_instruction\":{\"parts\":[{\"text\":");
-        try appendJsonString(&buf, allocator, sys);
+        try root.appendJsonString(&buf, allocator, sys);
         try buf.appendSlice(allocator, "}]}");
     }
 
@@ -448,74 +454,6 @@ fn buildChatRequestBody(
     try buf.appendSlice(allocator, "}}");
 
     return try buf.toOwnedSlice(allocator);
-}
-
-/// Append a JSON-escaped string (with enclosing quotes) to the buffer.
-fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    var escape_buf: [6]u8 = undefined;
-                    const escape = std.fmt.bufPrint(&escape_buf, "\\u{x:0>4}", .{c}) catch unreachable;
-                    try buf.appendSlice(allocator, escape);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-    try buf.append(allocator, '"');
-}
-
-/// HTTP POST via curl subprocess.
-/// If `bearer_token` is non-null, sends Authorization: Bearer header (for OAuth).
-/// For API key auth, the key is already in the URL query param, so pass null.
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, bearer_token: ?[]const u8) ![]u8 {
-    if (bearer_token) |token| {
-        var auth_hdr_buf: [512]u8 = undefined;
-        const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{token}) catch return error.CurlBufferError;
-
-        var child = std.process.Child.init(&.{
-            "curl", "-s",                             "-X", "POST",
-            "-H",   "Content-Type: application/json", "-H", auth_hdr,
-            "-d",   body,                             url,
-        }, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
-
-        const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-        const term = child.wait() catch return error.CurlWaitError;
-        if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-        return stdout;
-    } else {
-        var child = std.process.Child.init(&.{
-            "curl", "-s",                             "-X", "POST",
-            "-H",   "Content-Type: application/json", "-d", body,
-            url,
-        }, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
-
-        const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-        const term = child.wait() catch return error.CurlWaitError;
-        if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-        return stdout;
-    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -160,7 +160,7 @@ pub const OpenRouterProvider = struct {
         // Prepend system message if provided
         if (system) |sys| {
             try buf.appendSlice(allocator, "{\"role\":\"system\",\"content\":");
-            try appendJsonString(&buf, allocator, sys);
+            try root.appendJsonString(&buf, allocator, sys);
             try buf.append(allocator, '}');
             count += 1;
         }
@@ -172,7 +172,7 @@ pub const OpenRouterProvider = struct {
             try buf.appendSlice(allocator, "{\"role\":\"");
             try buf.appendSlice(allocator, msg.role.toSlice());
             try buf.appendSlice(allocator, "\",\"content\":");
-            try appendJsonString(&buf, allocator, msg.content);
+            try root.appendJsonString(&buf, allocator, msg.content);
 
             if (msg.tool_call_id) |tc_id| {
                 try buf.appendSlice(allocator, ",\"tool_call_id\":\"");
@@ -239,7 +239,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = curlPost(allocator, BASE_URL, body, auth_hdr, referer_hdr, title_hdr) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -290,7 +290,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = curlPost(allocator, BASE_URL, body, auth_hdr, referer_hdr, title_hdr) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -318,7 +318,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = curlPost(allocator, BASE_URL, body, auth_hdr, referer_hdr, title_hdr) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -353,7 +353,7 @@ pub const OpenRouterProvider = struct {
             try buf.appendSlice(allocator, "{\"role\":\"");
             try buf.appendSlice(allocator, msg.role.toSlice());
             try buf.appendSlice(allocator, "\",\"content\":");
-            try appendJsonString(&buf, allocator, msg.content);
+            try root.appendJsonString(&buf, allocator, msg.content);
             if (msg.tool_call_id) |tc_id| {
                 try buf.appendSlice(allocator, ",\"tool_call_id\":\"");
                 try buf.appendSlice(allocator, tc_id);
@@ -377,27 +377,6 @@ pub const OpenRouterProvider = struct {
     }
 };
 
-/// HTTP POST via curl subprocess with extra OpenRouter headers.
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8, referer_hdr: []const u8, title_hdr: []const u8) ![]u8 {
-    var child = std.process.Child.init(&.{
-        "curl", "-s",                             "-X", "POST",
-        "-H",   "Content-Type: application/json", "-H", auth_hdr,
-        "-H",   referer_hdr,                      "-H", title_hdr,
-        "-d",   body,                             url,
-    }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-    return stdout;
-}
-
 /// HTTP GET via curl subprocess with auth header.
 fn curlGet(allocator: std.mem.Allocator, url: []const u8, auth_hdr: []const u8) ![]u8 {
     var child = std.process.Child.init(&.{
@@ -417,30 +396,6 @@ fn curlGet(allocator: std.mem.Allocator, url: []const u8, auth_hdr: []const u8) 
     }
 
     return stdout;
-}
-
-/// Append a JSON-escaped string (with quotes) to the buffer.
-fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    var escape_buf: [6]u8 = undefined;
-                    const escape = std.fmt.bufPrint(&escape_buf, "\\u{x:0>4}", .{c}) catch unreachable;
-                    try buf.appendSlice(allocator, escape);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-    try buf.append(allocator, '"');
 }
 
 // ════════════════════════════════════════════════════════════════════════════

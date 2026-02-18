@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Tool = @import("root.zig").Tool;
 const ToolResult = @import("root.zig").ToolResult;
 const parseStringField = @import("shell.zig").parseStringField;
@@ -169,76 +168,6 @@ fn jpegDimensions(bytes: []const u8) ?[2]u32 {
     return null;
 }
 
-/// Screenshot tool — captures screenshots using platform-native commands.
-pub const ScreenshotTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
-
-    pub fn tool(self: *ScreenshotTool) Tool {
-        return .{
-            .ptr = @ptrCast(self),
-            .vtable = &vtable,
-        };
-    }
-
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args_json: []const u8) anyerror!ToolResult {
-        const self: *ScreenshotTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args_json);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "screenshot";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Capture a screenshot of the current screen.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"filename":{"type":"string","description":"Optional filename"},"region":{"type":"string","description":"Region: 'selection' or 'window' (macOS only)"}}}
-        ;
-    }
-
-    fn execute(_: *ScreenshotTool, allocator: std.mem.Allocator, args_json: []const u8) !ToolResult {
-        _ = args_json;
-        const output_path = "/tmp/nullclaw_screenshot.png";
-
-        const argv: []const []const u8 = switch (comptime builtin.os.tag) {
-            .macos => &.{ "screencapture", "-x", output_path },
-            .linux => &.{ "import", "-window", "root", output_path },
-            else => return ToolResult.fail("Screenshot not supported on this platform"),
-        };
-
-        var child = std.process.Child.init(argv, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch {
-            return ToolResult.fail("Failed to spawn screenshot command");
-        };
-
-        const stderr = child.stderr.?.readToEndAlloc(allocator, 1_048_576) catch "";
-        defer if (stderr.len > 0) allocator.free(stderr);
-
-        const term = child.wait() catch {
-            return ToolResult.fail("Failed to wait for screenshot command");
-        };
-
-        if (term.Exited == 0) {
-            const msg = try std.fmt.allocPrint(allocator, "Screenshot saved to: {s}", .{output_path});
-            return ToolResult{ .success = true, .output = msg };
-        } else {
-            const err_msg = try std.fmt.allocPrint(allocator, "Screenshot command failed: {s}", .{if (stderr.len > 0) stderr else "unknown error"});
-            return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
-        }
-    }
-};
-
 // ── Tests ───────────────────────────────────────────────────────────
 
 test "image_info tool name" {
@@ -252,12 +181,6 @@ test "image_info schema has path" {
     const t = it.tool();
     const schema = t.parametersJson();
     try std.testing.expect(std.mem.indexOf(u8, schema, "path") != null);
-}
-
-test "screenshot tool name" {
-    var st = ScreenshotTool{};
-    const t = st.tool();
-    try std.testing.expectEqualStrings("screenshot", t.name());
 }
 
 // ── Format detection tests ──────────────────────────────────────────

@@ -68,6 +68,7 @@ pub const Agent = struct {
     mem: ?Memory,
     observer: Observer,
     model_name: []const u8,
+    model_name_owned: bool = false,
     temperature: f64,
     workspace_dir: []const u8,
     max_tool_iterations: u32,
@@ -147,6 +148,7 @@ pub const Agent = struct {
     }
 
     pub fn deinit(self: *Agent) void {
+        if (self.model_name_owned) self.allocator.free(self.model_name);
         for (self.history.items) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -379,7 +381,9 @@ pub const Agent = struct {
             if (arg.len == 0) {
                 return try std.fmt.allocPrint(self.allocator, "Current model: {s}", .{self.model_name});
             }
-            self.model_name = arg;
+            if (self.model_name_owned) self.allocator.free(self.model_name);
+            self.model_name = try self.allocator.dupe(u8, arg);
+            self.model_name_owned = true;
             return try std.fmt.allocPrint(self.allocator, "Switched to model: {s}", .{arg});
         }
 
@@ -474,7 +478,7 @@ pub const Agent = struct {
                     self.stream_callback.?,
                     self.stream_ctx.?,
                 ) catch |err| {
-                    const fail_duration: u64 = @intCast(std.time.milliTimestamp() - timer_start);
+                    const fail_duration: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - timer_start)));
                     const fail_event = ObserverEvent{ .llm_response = .{
                         .provider = self.provider.getName(),
                         .model = self.model_name,
@@ -504,7 +508,7 @@ pub const Agent = struct {
                     self.temperature,
                 ) catch |err| retry_blk: {
                     // Record the failed attempt
-                    const fail_duration: u64 = @intCast(std.time.milliTimestamp() - timer_start);
+                    const fail_duration: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - timer_start)));
                     const fail_event = ObserverEvent{ .llm_response = .{
                         .provider = self.provider.getName(),
                         .model = self.model_name,
@@ -549,7 +553,7 @@ pub const Agent = struct {
                 };
             }
 
-            const duration_ms: u64 = @intCast(std.time.milliTimestamp() - timer_start);
+            const duration_ms: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - timer_start)));
             const resp_event = ObserverEvent{ .llm_response = .{
                 .provider = self.provider.getName(),
                 .model = self.model_name,
@@ -682,7 +686,7 @@ pub const Agent = struct {
 
                 const tool_timer = std.time.milliTimestamp();
                 const result = self.executeTool(call);
-                const tool_duration: u64 = @intCast(std.time.milliTimestamp() - tool_timer);
+                const tool_duration: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - tool_timer)));
 
                 const tool_event = ObserverEvent{ .tool_call = .{
                     .tool = call.name,
@@ -882,11 +886,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     else
         null;
 
-    // Create tools
+    // Create tools (with agents config for delegate depth enforcement)
     const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
         .http_enabled = cfg.http_request.enabled,
         .browser_enabled = cfg.browser.enabled,
         .mcp_tools = mcp_tools,
+        .agents = cfg.agents,
+        .fallback_api_key = cfg.api_key,
     });
     defer allocator.free(tools);
 
@@ -1980,6 +1986,38 @@ test "cliStreamCallback text delta chunk" {
     try std.testing.expectEqualStrings("hello", chunk.delta);
     try std.testing.expect(!chunk.is_final);
     try std.testing.expectEqual(@as(u32, 2), chunk.token_count);
+}
+
+// ── Bug regression tests ─────────────────────────────────────────
+
+// Bug 1: /model command should dupe the arg to avoid use-after-free.
+// model_name must survive past the stack buffer that held the original message.
+test "slash /model dupe prevents use-after-free" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+
+    // Build message in a buffer that we then invalidate (simulate stack lifetime end)
+    var msg_buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "/model new-model-xyz", .{}) catch unreachable;
+    const response = (try agent.handleSlashCommand(msg)).?;
+    defer allocator.free(response);
+
+    // Overwrite the source buffer to verify model_name is an independent copy
+    @memset(&msg_buf, 0);
+    try std.testing.expectEqualStrings("new-model-xyz", agent.model_name);
+}
+
+// Bug 2: @intCast on negative i64 duration should not panic.
+// Simulate by verifying the @max(0, ...) clamping logic.
+test "milliTimestamp negative difference clamps to zero" {
+    // Simulate: timer_start is in the future relative to "now" (negative diff)
+    const timer_start = std.time.milliTimestamp() + 10_000;
+    const diff = std.time.milliTimestamp() - timer_start;
+    // diff < 0 here; @max(0, diff) must clamp to 0 without panic
+    const clamped = @max(0, diff);
+    const duration: u64 = @as(u64, @intCast(clamped));
+    try std.testing.expectEqual(@as(u64, 0), duration);
 }
 
 test "Agent streaming fields can be set" {

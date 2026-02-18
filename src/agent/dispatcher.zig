@@ -448,7 +448,7 @@ fn extractJsonObject(input: []const u8) ?[]const u8 {
         if (!in_string) {
             if (c == start_info.open) depth += 1;
             if (c == start_info.close) {
-                depth -= 1;
+                if (depth > 0) depth -= 1;
                 if (depth == 0) return trimmed[start_info.pos .. i + 1];
             }
         }
@@ -887,6 +887,26 @@ test "formatToolResults multiple results" {
     try std.testing.expect(std.mem.indexOf(u8, formatted, "search") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "file1.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "not found") != null);
+}
+
+// Bug 3 regression: unmatched close brace/bracket must not underflow depth (usize).
+// Before fix, `depth -= 1` when depth==0 caused a panic (usize underflow).
+test "extractJsonObject unmatched close brace does not panic" {
+    // Input starts with '}' — no matching open, depth would underflow before fix.
+    const result = extractJsonObject("} not an object {\"key\":\"ok\"}");
+    // The second valid object should still be found (or null — both are acceptable).
+    // The important thing is no panic.
+    if (result) |r| {
+        try std.testing.expect(r.len > 0);
+    }
+}
+
+test "extractJsonObject unmatched close bracket does not panic" {
+    // Input starts with ']' — no matching open.
+    const result = extractJsonObject("] some text [1,2,3]");
+    if (result) |r| {
+        try std.testing.expect(r.len > 0);
+    }
 }
 
 test "extractJsonObject with leading text" {

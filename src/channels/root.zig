@@ -162,6 +162,41 @@ pub fn nowEpochSecs() u64 {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Shared Utilities (re-exported from top-level modules)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// HTTP POST via curl subprocess (safe on Zig 0.15, avoids std.http.Client segfaults).
+pub const http_util = @import("../http_util.zig");
+
+/// JSON string escaping (RFC 8259). appendJsonString adds enclosing quotes.
+pub const json_util = @import("../json_util.zig");
+
+/// Append a JSON-escaped string with enclosing quotes to any writer.
+/// Writer-based variant of json_util.appendJsonString for fixed-buffer streams.
+pub fn appendJsonStringW(writer: anytype, text: []const u8) !void {
+    try writer.writeByte('"');
+    for (text) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    var esc: [6]u8 = undefined;
+                    const escape = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{c}) catch unreachable;
+                    try writer.writeAll(escape);
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+    try writer.writeByte('"');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Tests
 // ════════════════════════════════════════════════════════════════════════════
 

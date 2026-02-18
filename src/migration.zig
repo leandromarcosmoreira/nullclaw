@@ -11,6 +11,8 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const memory_root = @import("memory/root.zig");
 
+const log = std.log.scoped(.migration);
+
 /// Statistics collected during migration.
 pub const MigrationStats = struct {
     from_sqlite: usize = 0,
@@ -107,7 +109,8 @@ pub fn migrateOpenclaw(
         }
 
         const category = memory_root.MemoryCategory.fromString(entry.category);
-        mem.store(key, entry.content, category, null) catch {
+        mem.store(key, entry.content, category, null) catch |err| {
+            log.err("failed to store migration entry '{s}': {}", .{ key, err });
             continue;
         };
         stats.imported += 1;

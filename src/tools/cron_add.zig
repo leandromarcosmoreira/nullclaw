@@ -40,13 +40,6 @@ pub const CronAddTool = struct {
         ;
     }
 
-    /// Load the CronScheduler from persisted state (~/.nullclaw/cron.json).
-    fn loadScheduler(allocator: std.mem.Allocator) !CronScheduler {
-        var scheduler = CronScheduler.init(allocator, 1024, true);
-        cron.loadJobs(&scheduler) catch {};
-        return scheduler;
-    }
-
     fn execute(_: *CronAddTool, allocator: std.mem.Allocator, args_json: []const u8) !ToolResult {
         const command = parseStringField(args_json, "command") orelse
             return ToolResult.fail("Missing required 'command' parameter");
@@ -110,6 +103,14 @@ pub const CronAddTool = struct {
         return ToolResult.fail("Unexpected state: no expression or delay");
     }
 };
+
+/// Load the CronScheduler from persisted state (~/.nullclaw/cron.json).
+/// Shared by cron_add, cron_list, cron_remove, and schedule tools.
+pub fn loadScheduler(allocator: std.mem.Allocator) !CronScheduler {
+    var scheduler = CronScheduler.init(allocator, 1024, true);
+    cron.loadJobs(&scheduler) catch {};
+    return scheduler;
+}
 
 // ── Tests ───────────────────────────────────────────────────────────
 

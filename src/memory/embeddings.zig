@@ -42,6 +42,10 @@ pub const EmbeddingProvider = struct {
 // ── Noop provider (keyword-only fallback) ─────────────────────────
 
 pub const NoopEmbedding = struct {
+    /// Allocator used to free the heap allocation in deinit.
+    /// Set to null only when the instance is stack-allocated by the caller.
+    allocator: ?std.mem.Allocator = null,
+
     const Self = @This();
 
     fn implName(_: *anyopaque) []const u8 {
@@ -56,7 +60,12 @@ pub const NoopEmbedding = struct {
         return allocator.alloc(f32, 0);
     }
 
-    fn implDeinit(_: *anyopaque) void {}
+    fn implDeinit(ptr: *anyopaque) void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        if (self_.allocator) |alloc| {
+            alloc.destroy(self_);
+        }
+    }
 
     const vtable = EmbeddingProvider.VTable{
         .name = &implName,
@@ -311,8 +320,9 @@ pub fn createEmbeddingProvider(
         return impl_.provider();
     }
 
-    // Default: noop (keyword-only search)
-    var noop_inst = NoopEmbedding{};
+    // Default: noop (keyword-only search) — heap-allocate so the vtable pointer stays valid.
+    const noop_inst = try allocator.create(NoopEmbedding);
+    noop_inst.* = .{ .allocator = allocator };
     return noop_inst.provider();
 }
 
@@ -421,4 +431,26 @@ test "OpenAiEmbedding embeddingsUrl already has embeddings" {
     const url = try impl_.embeddingsUrl(std.testing.allocator);
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://my-api.example.com/api/v2/embeddings", url);
+}
+
+// Regression test: createEmbeddingProvider("none") must heap-allocate NoopEmbedding
+// so the returned EmbeddingProvider vtable pointer remains valid after the factory returns.
+test "createEmbeddingProvider noop is heap allocated and deinit frees memory" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "none", null, "", 0);
+    // Use the provider — pointer must still be valid here (no dangling ptr).
+    try std.testing.expectEqualStrings("none", p.getName());
+    try std.testing.expectEqual(@as(u32, 0), p.getDimensions());
+    const vec = try p.embed(std.testing.allocator, "hello");
+    defer std.testing.allocator.free(vec);
+    try std.testing.expectEqual(@as(usize, 0), vec.len);
+    // deinit must free the heap allocation without crashing (verified by allocator leak check).
+    p.deinit();
+}
+
+test "createEmbeddingProvider openai is heap allocated and deinit frees memory" {
+    const p = try createEmbeddingProvider(std.testing.allocator, "openai", "test-key", "text-embedding-3-small", 1536);
+    try std.testing.expectEqualStrings("openai", p.getName());
+    try std.testing.expectEqual(@as(u32, 1536), p.getDimensions());
+    // deinit must free all allocations without crashing.
+    p.deinit();
 }

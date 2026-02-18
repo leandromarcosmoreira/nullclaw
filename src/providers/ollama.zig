@@ -258,7 +258,7 @@ pub const OllamaProvider = struct {
         const body = try buildRequestBody(allocator, system_prompt, message, model, temperature);
         defer allocator.free(body);
 
-        const resp_body = curlPost(allocator, url, body) catch return error.OllamaApiError;
+        const resp_body = root.curlPost(allocator, url, body, &.{}) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
 
         return parseResponse(allocator, resp_body);
@@ -279,7 +279,7 @@ pub const OllamaProvider = struct {
         const body = try buildChatRequestBody(allocator, request, model, temperature);
         defer allocator.free(body);
 
-        const resp_body = curlPost(allocator, url, body) catch return error.OllamaApiError;
+        const resp_body = root.curlPost(allocator, url, body, &.{}) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
 
         const text = try parseResponse(allocator, resp_body);
@@ -329,26 +329,6 @@ fn buildChatRequestBody(
     try buf.appendSlice(allocator, "}}");
 
     return try buf.toOwnedSlice(allocator);
-}
-
-/// HTTP POST via curl subprocess (no auth needed for local Ollama).
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
-    var child = std.process.Child.init(&.{
-        "curl", "-s",                             "-X", "POST",
-        "-H",   "Content-Type: application/json", "-d", body,
-        url,
-    }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-    return stdout;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

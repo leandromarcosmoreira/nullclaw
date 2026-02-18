@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const audit_log = std.log.scoped(.audit);
 
 /// Audit event types
 pub const AuditEventType = enum {
@@ -257,12 +258,19 @@ pub const AuditLogger = struct {
         while (i >= 1) : (i -= 1) {
             const old_name = std.fmt.bufPrint(&buf_old, "{s}.{d}.log", .{ self.log_path, i }) catch continue;
             const new_name = std.fmt.bufPrint(&buf_new, "{s}.{d}.log", .{ self.log_path, i + 1 }) catch continue;
-            std.fs.cwd().rename(old_name, new_name) catch {};
+            std.fs.cwd().rename(old_name, new_name) catch |err| {
+                // Not an error if old rotation file doesn't exist yet
+                if (err != error.FileNotFound) {
+                    audit_log.err("audit log rotation rename {s} -> {s}: {}", .{ old_name, new_name, err });
+                }
+            };
         }
 
         // Rename current log to .1
         const rotated = std.fmt.bufPrint(&buf_old, "{s}.1.log", .{self.log_path}) catch return;
-        std.fs.cwd().rename(self.log_path, rotated) catch {};
+        std.fs.cwd().rename(self.log_path, rotated) catch |err| {
+            audit_log.err("audit log rotation failed to rename {s} -> {s}: {}", .{ self.log_path, rotated, err });
+        };
     }
 };
 

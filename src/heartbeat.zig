@@ -94,7 +94,7 @@ pub const HeartbeatEngine = struct {
 
 test "parseTasks basic" {
     const content = "# Tasks\n\n- Check email\n- Review calendar\nNot a task\n- Third task";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 3), tasks.len);
     try std.testing.expectEqualStrings("Check email", tasks[0]);
     try std.testing.expectEqualStrings("Review calendar", tasks[1]);
@@ -102,18 +102,18 @@ test "parseTasks basic" {
 }
 
 test "parseTasks empty content" {
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, "");
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, "");
     try std.testing.expectEqual(@as(usize, 0), tasks.len);
 }
 
 test "parseTasks only comments" {
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, "# No tasks here\n\nJust comments\n# Another");
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, "# No tasks here\n\nJust comments\n# Another");
     try std.testing.expectEqual(@as(usize, 0), tasks.len);
 }
 
 test "parseTasks with leading whitespace" {
     const content = "  - Indented task\n\t- Tab indented";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
     try std.testing.expectEqualStrings("Indented task", tasks[0]);
     try std.testing.expectEqualStrings("Tab indented", tasks[1]);
@@ -121,7 +121,7 @@ test "parseTasks with leading whitespace" {
 
 test "parseTasks dash without space ignored" {
     const content = "- Real task\n-\n- Another";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
     try std.testing.expectEqualStrings("Real task", tasks[0]);
     try std.testing.expectEqualStrings("Another", tasks[1]);
@@ -129,25 +129,25 @@ test "parseTasks dash without space ignored" {
 
 test "parseTasks trailing space bullet skipped" {
     const content = "- ";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 0), tasks.len);
 }
 
 test "parseTasks unicode" {
     const content = "- Check email \xf0\x9f\x93\xa7\n- Review calendar \xf0\x9f\x93\x85";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
 }
 
 test "parseTasks single task" {
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, "- Only one");
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, "- Only one");
     try std.testing.expectEqual(@as(usize, 1), tasks.len);
     try std.testing.expectEqualStrings("Only one", tasks[0]);
 }
 
 test "parseTasks mixed markdown" {
     const content = "# Periodic Tasks\n\n## Quick\n- Task A\n\n## Long\n- Task B\n\n* Not a dash bullet\n1. Not numbered";
-    const tasks = try HeartbeatEngine.parseTasks(std.heap.page_allocator, content);
+    const tasks = try HeartbeatEngine.parseTasks(std.heap.smp_allocator, content);
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
     try std.testing.expectEqualStrings("Task A", tasks[0]);
     try std.testing.expectEqualStrings("Task B", tasks[1]);

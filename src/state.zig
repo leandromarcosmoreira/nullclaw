@@ -5,6 +5,7 @@
 //! Persisted to `~/.nullclaw/state.json` with atomic writes (temp + rename).
 
 const std = @import("std");
+const yc = @import("root.zig");
 const Allocator = std.mem.Allocator;
 
 /// Runtime state persisted to disk.
@@ -87,14 +88,16 @@ pub const StateManager = struct {
 
         try buf.appendSlice(self.allocator, "{\n");
         if (channel) |ch| {
-            try appendJsonString(&buf, self.allocator, "  \"last_channel\": \"", ch);
-            try buf.appendSlice(self.allocator, "\",\n");
+            try buf.appendSlice(self.allocator, "  \"last_channel\": ");
+            try yc.json_util.appendJsonString(&buf, self.allocator, ch);
+            try buf.appendSlice(self.allocator, ",\n");
         } else {
             try buf.appendSlice(self.allocator, "  \"last_channel\": null,\n");
         }
         if (chat_id) |cid| {
-            try appendJsonString(&buf, self.allocator, "  \"last_chat_id\": \"", cid);
-            try buf.appendSlice(self.allocator, "\",\n");
+            try buf.appendSlice(self.allocator, "  \"last_chat_id\": ");
+            try yc.json_util.appendJsonString(&buf, self.allocator, cid);
+            try buf.appendSlice(self.allocator, ",\n");
         } else {
             try buf.appendSlice(self.allocator, "  \"last_chat_id\": null,\n");
         }
@@ -160,21 +163,6 @@ pub const StateManager = struct {
         } else 0;
     }
 };
-
-/// Append a JSON-safe string to buffer.
-fn appendJsonString(buf: *std.ArrayList(u8), allocator: Allocator, prefix: []const u8, value: []const u8) !void {
-    try buf.appendSlice(allocator, prefix);
-    for (value) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
 
 /// Derive the default state file path from workspace dir.
 pub fn defaultStatePath(allocator: Allocator, workspace_dir: []const u8) ![]u8 {
@@ -352,11 +340,4 @@ test "defaultStatePath" {
     const path = try defaultStatePath(testing.allocator, "/home/user/.nullclaw");
     defer testing.allocator.free(path);
     try testing.expectEqualStrings("/home/user/.nullclaw/state.json", path);
-}
-
-test "appendJsonString escapes properly" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try appendJsonString(&buf, testing.allocator, "\"val\": \"", "a\"b\\c\nd");
-    try testing.expectEqualStrings("\"val\": \"a\\\"b\\\\c\\nd", buf.items);
 }

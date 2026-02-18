@@ -4,6 +4,7 @@ const ToolResult = @import("root.zig").ToolResult;
 const parseStringField = @import("shell.zig").parseStringField;
 const cron = @import("../cron.zig");
 const CronScheduler = cron.CronScheduler;
+const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// Schedule tool — lets the agent manage recurring and one-shot scheduled tasks.
 /// Delegates to the CronScheduler from the cron module for persistent job management.
@@ -39,13 +40,6 @@ pub const ScheduleTool = struct {
         return 
         \\{"type":"object","properties":{"action":{"type":"string","enum":["create","add","once","list","get","cancel","remove","pause","resume"],"description":"Action to perform"},"expression":{"type":"string","description":"Cron expression for recurring tasks"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"id":{"type":"string","description":"Task ID"}},"required":["action"]}
         ;
-    }
-
-    /// Load the CronScheduler from persisted state (~/.nullclaw/cron.json).
-    fn loadScheduler(allocator: std.mem.Allocator) !CronScheduler {
-        var scheduler = CronScheduler.init(allocator, 1024, true);
-        cron.loadJobs(&scheduler) catch {};
-        return scheduler;
     }
 
     fn execute(_: *ScheduleTool, allocator: std.mem.Allocator, args_json: []const u8) !ToolResult {

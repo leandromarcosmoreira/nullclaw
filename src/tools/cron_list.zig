@@ -3,6 +3,7 @@ const Tool = @import("root.zig").Tool;
 const ToolResult = @import("root.zig").ToolResult;
 const cron = @import("../cron.zig");
 const CronScheduler = cron.CronScheduler;
+const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronList tool — lists all scheduled cron jobs with their status and next run time.
 pub const CronListTool = struct {
@@ -37,13 +38,6 @@ pub const CronListTool = struct {
         return 
         \\{"type":"object","properties":{}}
         ;
-    }
-
-    /// Load the CronScheduler from persisted state (~/.nullclaw/cron.json).
-    fn loadScheduler(allocator: std.mem.Allocator) !CronScheduler {
-        var scheduler = CronScheduler.init(allocator, 1024, true);
-        cron.loadJobs(&scheduler) catch {};
-        return scheduler;
     }
 
     fn execute(_: *CronListTool, allocator: std.mem.Allocator, _: []const u8) !ToolResult {

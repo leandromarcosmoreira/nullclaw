@@ -7,6 +7,7 @@ const std = @import("std");
 const Tool = @import("root.zig").Tool;
 const ToolResult = @import("root.zig").ToolResult;
 const parseStringField = @import("shell.zig").parseStringField;
+const net_security = @import("../root.zig").net_security;
 
 /// Default max chars for extracted content.
 const DEFAULT_MAX_CHARS: usize = 50_000;
@@ -56,9 +57,9 @@ pub const WebFetchTool = struct {
         }
 
         // SSRF protection — block local/private hosts
-        const host = extractHost(url) orelse
+        const host = net_security.extractHost(url) orelse
             return ToolResult.fail("Invalid URL: cannot extract host");
-        if (isLocalHost(host))
+        if (net_security.isLocalHost(host))
             return ToolResult.fail("Blocked local/private host");
 
         const max_chars = parseMaxChars(args_json);
@@ -131,42 +132,6 @@ fn parseMaxChars(json: []const u8) usize {
     if (val < 100) return 100;
     if (val > 200_000) return 200_000;
     return val;
-}
-
-fn extractHost(url: []const u8) ?[]const u8 {
-    const rest = if (std.mem.startsWith(u8, url, "https://"))
-        url[8..]
-    else if (std.mem.startsWith(u8, url, "http://"))
-        url[7..]
-    else
-        return null;
-
-    var end: usize = rest.len;
-    for (rest, 0..) |c, i| {
-        if (c == '/' or c == '?' or c == '#' or c == ':') {
-            end = i;
-            break;
-        }
-    }
-    if (end == 0) return null;
-    return rest[0..end];
-}
-
-fn isLocalHost(host: []const u8) bool {
-    if (std.mem.eql(u8, host, "localhost")) return true;
-    if (std.mem.startsWith(u8, host, "127.")) return true;
-    if (std.mem.eql(u8, host, "0.0.0.0")) return true;
-    if (std.mem.eql(u8, host, "::1")) return true;
-    if (std.mem.startsWith(u8, host, "10.")) return true;
-    if (std.mem.startsWith(u8, host, "192.168.")) return true;
-    if (std.mem.startsWith(u8, host, "172.")) {
-        // 172.16.0.0 – 172.31.255.255
-        if (host.len > 4) {
-            const second = std.fmt.parseInt(u8, host[4 .. std.mem.indexOfScalar(u8, host[4..], '.') orelse return false], 10) catch return false;
-            if (second >= 16 and second <= 31) return true;
-        }
-    }
-    return false;
 }
 
 /// Convert HTML to readable text with basic markdown formatting.
@@ -552,20 +517,20 @@ test "htmlToText plain text passthrough" {
 }
 
 test "extractHost parses correctly" {
-    try testing.expectEqualStrings("example.com", extractHost("https://example.com/path").?);
-    try testing.expectEqualStrings("sub.domain.org", extractHost("http://sub.domain.org?q=1").?);
-    try testing.expectEqualStrings("host", extractHost("https://host:8080/").?);
-    try testing.expect(extractHost("ftp://nope") == null);
+    try testing.expectEqualStrings("example.com", net_security.extractHost("https://example.com/path").?);
+    try testing.expectEqualStrings("sub.domain.org", net_security.extractHost("http://sub.domain.org?q=1").?);
+    try testing.expectEqualStrings("host", net_security.extractHost("https://host:8080/").?);
+    try testing.expect(net_security.extractHost("ftp://nope") == null);
 }
 
 test "isLocalHost detects private ranges" {
-    try testing.expect(isLocalHost("localhost"));
-    try testing.expect(isLocalHost("127.0.0.1"));
-    try testing.expect(isLocalHost("10.0.0.1"));
-    try testing.expect(isLocalHost("192.168.1.1"));
-    try testing.expect(isLocalHost("0.0.0.0"));
-    try testing.expect(!isLocalHost("example.com"));
-    try testing.expect(!isLocalHost("8.8.8.8"));
+    try testing.expect(net_security.isLocalHost("localhost"));
+    try testing.expect(net_security.isLocalHost("127.0.0.1"));
+    try testing.expect(net_security.isLocalHost("10.0.0.1"));
+    try testing.expect(net_security.isLocalHost("192.168.1.1"));
+    try testing.expect(net_security.isLocalHost("0.0.0.0"));
+    try testing.expect(!net_security.isLocalHost("example.com"));
+    try testing.expect(!net_security.isLocalHost("8.8.8.8"));
 }
 
 test "parseMaxChars" {

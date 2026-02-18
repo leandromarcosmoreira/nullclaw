@@ -8,6 +8,7 @@
 const std = @import("std");
 const tools_mod = @import("tools/root.zig");
 const config_mod = @import("config.zig");
+const yc = @import("root.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.mcp);
@@ -106,12 +107,16 @@ pub const McpServer = struct {
     /// Call a specific tool on the MCP server.
     pub fn callTool(self: *McpServer, tool_name: []const u8, args_json: []const u8) ![]const u8 {
         // Build params: {"name": "...", "arguments": ...}
-        const params = try std.fmt.allocPrint(self.allocator,
-            \\{{"name":"{s}","arguments":{s}}}
-        , .{ tool_name, args_json });
-        defer self.allocator.free(params);
+        // Use proper JSON escaping for tool_name to prevent injection.
+        var params_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer params_buf.deinit(self.allocator);
+        try params_buf.appendSlice(self.allocator, "{\"name\":");
+        try yc.json_util.appendJsonString(&params_buf, self.allocator, tool_name);
+        try params_buf.appendSlice(self.allocator, ",\"arguments\":");
+        try params_buf.appendSlice(self.allocator, args_json);
+        try params_buf.append(self.allocator, '}');
 
-        const resp = try self.sendRequest(self.allocator, "tools/call", params);
+        const resp = try self.sendRequest(self.allocator, "tools/call", params_buf.items);
         defer self.allocator.free(resp);
         return try parseCallToolResponse(self.allocator, resp);
     }

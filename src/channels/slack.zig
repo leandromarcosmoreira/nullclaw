@@ -1,6 +1,8 @@
 const std = @import("std");
 const root = @import("root.zig");
 
+const log = std.log.scoped(.slack);
+
 /// Slack channel — polls conversations.history for new messages, sends via chat.postMessage.
 pub const SlackChannel = struct {
     allocator: std.mem.Allocator,
@@ -68,52 +70,31 @@ pub const SlackChannel = struct {
         const actual_channel = self.parseTarget(target_channel);
 
         // Build JSON body
-        var body_buf: [8192]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&body_buf);
-        const w = fbs.writer();
-        try w.writeAll("{\"channel\":\"");
-        try w.writeAll(actual_channel);
-        try w.writeAll("\",\"mrkdwn\":true,\"text\":\"");
-        for (text) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                else => try w.writeByte(c),
-            }
-        }
-        try w.writeByte('"');
-        if (self.thread_ts) |tts| {
-            try w.writeAll(",\"thread_ts\":\"");
-            try w.writeAll(tts);
-            try w.writeByte('"');
-        }
-        try w.writeByte('}');
-        const body = fbs.getWritten();
+        var body_list: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_list.deinit(self.allocator);
 
-        // Build auth header: "Bearer xoxb-..."
+        try body_list.appendSlice(self.allocator, "{\"channel\":\"");
+        try body_list.appendSlice(self.allocator, actual_channel);
+        try body_list.appendSlice(self.allocator, "\",\"mrkdwn\":true,\"text\":");
+        try root.json_util.appendJsonString(&body_list, self.allocator, text);
+        if (self.thread_ts) |tts| {
+            try body_list.appendSlice(self.allocator, ",\"thread_ts\":\"");
+            try body_list.appendSlice(self.allocator, tts);
+            try body_list.append(self.allocator, '"');
+        }
+        try body_list.append(self.allocator, '}');
+
+        // Build auth header: "Authorization: Bearer xoxb-..."
         var auth_buf: [512]u8 = undefined;
         var auth_fbs = std.io.fixedBufferStream(&auth_buf);
-        try auth_fbs.writer().print("Bearer {s}", .{self.bot_token});
-        const auth_value = auth_fbs.getWritten();
+        try auth_fbs.writer().print("Authorization: Bearer {s}", .{self.bot_token});
+        const auth_header = auth_fbs.getWritten();
 
-        var client = std.http.Client{ .allocator = self.allocator };
-        defer client.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .extra_headers = &.{
-                .{ .name = "Content-Type", .value = "application/json; charset=utf-8" },
-                .{ .name = "Authorization", .value = auth_value },
-            },
-        }) catch return error.SlackApiError;
-
-        if (result.status != .ok) {
+        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+            log.err("Slack API POST failed: {}", .{err});
             return error.SlackApiError;
-        }
+        };
+        self.allocator.free(resp);
     }
 
     fn vtableStart(ptr: *anyopaque) anyerror!void {

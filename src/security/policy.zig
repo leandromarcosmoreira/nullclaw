@@ -1,4 +1,5 @@
 const std = @import("std");
+const RateTracker = @import("tracker.zig").RateTracker;
 
 /// How much autonomy the agent has
 pub const AutonomyLevel = enum {
@@ -44,61 +45,6 @@ pub const CommandRiskLevel = enum {
     }
 };
 
-/// Sliding-window action tracker for rate limiting.
-/// Records timestamps of actions and prunes entries older than 1 hour.
-pub const ActionTracker = struct {
-    /// Timestamps of recent actions in nanoseconds (monotonic clock)
-    actions: std.ArrayList(i128) = .empty,
-    allocator: std.mem.Allocator,
-    /// Window duration in nanoseconds (1 hour)
-    const WINDOW_NS: i128 = 3600 * std.time.ns_per_s;
-
-    pub fn init(allocator: std.mem.Allocator) ActionTracker {
-        return .{
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *ActionTracker) void {
-        self.actions.deinit(self.allocator);
-    }
-
-    /// Record an action and return the current count within the window.
-    pub fn record(self: *ActionTracker) !usize {
-        self.prune();
-        try self.actions.append(self.allocator, std.time.nanoTimestamp());
-        return self.actions.items.len;
-    }
-
-    /// Count of actions in the current window without recording.
-    pub fn count(self: *ActionTracker) usize {
-        self.prune();
-        return self.actions.items.len;
-    }
-
-    /// Clone this tracker (creates independent copy)
-    pub fn clone(self: *const ActionTracker) !ActionTracker {
-        return .{
-            .actions = try self.actions.clone(self.allocator),
-            .allocator = self.allocator,
-        };
-    }
-
-    fn prune(self: *ActionTracker) void {
-        const now = std.time.nanoTimestamp();
-        const cutoff = now - WINDOW_NS;
-        // Remove entries older than the window
-        var write_idx: usize = 0;
-        for (self.actions.items) |ts| {
-            if (ts > cutoff) {
-                self.actions.items[write_idx] = ts;
-                write_idx += 1;
-            }
-        }
-        self.actions.shrinkRetainingCapacity(write_idx);
-    }
-};
-
 /// High-risk commands that are always blocked/require elevated approval.
 const high_risk_commands = [_][]const u8{
     "rm",       "mkfs",         "dd",     "shutdown", "reboot", "halt",
@@ -132,7 +78,7 @@ pub const SecurityPolicy = struct {
     max_cost_per_day_cents: u32 = 500,
     require_approval_for_medium_risk: bool = true,
     block_high_risk_commands: bool = true,
-    tracker: ?*ActionTracker = null,
+    tracker: ?*RateTracker = null,
 
     /// Classify command risk level.
     pub fn commandRiskLevel(self: *const SecurityPolicy, command: []const u8) CommandRiskLevel {
@@ -315,8 +261,7 @@ pub const SecurityPolicy = struct {
     /// Returns true if the action is allowed, false if rate-limited.
     pub fn recordAction(self: *const SecurityPolicy) !bool {
         if (self.tracker) |tracker| {
-            const action_count = try tracker.record();
-            return action_count <= self.max_actions_per_hour;
+            return tracker.recordAction();
         }
         return true;
     }
@@ -324,7 +269,7 @@ pub const SecurityPolicy = struct {
     /// Check if the rate limit would be exceeded without recording.
     pub fn isRateLimited(self: *const SecurityPolicy) bool {
         if (self.tracker) |tracker| {
-            return tracker.count() >= self.max_actions_per_hour;
+            return tracker.isLimited();
         }
         return false;
     }
@@ -796,38 +741,23 @@ test "path with null byte blocked" {
     try std.testing.expect(!p.isPathAllowed("file\x00.txt"));
 }
 
-test "action tracker starts at zero" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+test "rate tracker starts at zero" {
+    var tracker = RateTracker.init(std.testing.allocator, 10);
     defer tracker.deinit();
     try std.testing.expectEqual(@as(usize, 0), tracker.count());
 }
 
-test "action tracker records actions" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+test "rate tracker records actions" {
+    var tracker = RateTracker.init(std.testing.allocator, 100);
     defer tracker.deinit();
-    try std.testing.expectEqual(@as(usize, 1), try tracker.record());
-    try std.testing.expectEqual(@as(usize, 2), try tracker.record());
-    try std.testing.expectEqual(@as(usize, 3), try tracker.record());
+    try std.testing.expect(try tracker.recordAction());
+    try std.testing.expect(try tracker.recordAction());
+    try std.testing.expect(try tracker.recordAction());
     try std.testing.expectEqual(@as(usize, 3), tracker.count());
-}
-
-test "action tracker clone is independent" {
-    var tracker = ActionTracker.init(std.testing.allocator);
-    defer tracker.deinit();
-    _ = try tracker.record();
-    _ = try tracker.record();
-
-    var cloned = try tracker.clone();
-    defer cloned.deinit();
-    try std.testing.expectEqual(@as(usize, 2), cloned.count());
-
-    _ = try tracker.record();
-    try std.testing.expectEqual(@as(usize, 3), tracker.count());
-    try std.testing.expectEqual(@as(usize, 2), cloned.count());
 }
 
 test "record action allows within limit" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+    var tracker = RateTracker.init(std.testing.allocator, 5);
     defer tracker.deinit();
     var p = SecurityPolicy{
         .max_actions_per_hour = 5,
@@ -840,7 +770,7 @@ test "record action allows within limit" {
 }
 
 test "record action blocks over limit" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+    var tracker = RateTracker.init(std.testing.allocator, 3);
     defer tracker.deinit();
     var p = SecurityPolicy{
         .max_actions_per_hour = 3,
@@ -854,7 +784,7 @@ test "record action blocks over limit" {
 }
 
 test "is rate limited reflects count" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+    var tracker = RateTracker.init(std.testing.allocator, 2);
     defer tracker.deinit();
     var p = SecurityPolicy{
         .max_actions_per_hour = 2,
@@ -1063,7 +993,7 @@ test "no tracker means no rate limit" {
 }
 
 test "record action returns false on exact boundary plus one" {
-    var tracker = ActionTracker.init(std.testing.allocator);
+    var tracker = RateTracker.init(std.testing.allocator, 1);
     defer tracker.deinit();
     var p = SecurityPolicy{
         .max_actions_per_hour = 1,

@@ -217,14 +217,15 @@ fn channelWatcherThread(state: *DaemonState) void {
 /// Run the daemon. This is the main entry point for `nullclaw daemon`.
 /// Spawns threads for gateway, heartbeat, and channels, then loops until
 /// shutdown is requested (Ctrl+C signal or explicit request).
-pub fn run(allocator: std.mem.Allocator, config: *const Config) !void {
+/// `host` and `port` are CLI-parsed values that override `config.gateway`.
+pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16) !void {
     health.markComponentOk("daemon");
     shutdown_requested.store(false, .release);
 
     var state = DaemonState{
         .started = true,
-        .gateway_host = config.gateway.host,
-        .gateway_port = config.gateway.port,
+        .gateway_host = host,
+        .gateway_port = port,
     };
     state.addComponent("gateway");
 
@@ -258,7 +259,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config) !void {
 
     // Spawn gateway thread
     state.markRunning("gateway");
-    const gw_thread = std.Thread.spawn(.{}, gatewayThread, .{ allocator, config.gateway.host, config.gateway.port, &state }) catch |err| {
+    const gw_thread = std.Thread.spawn(.{}, gatewayThread, .{ allocator, host, port, &state }) catch |err| {
         state.markError("gateway", @errorName(err));
         try stdout.print("Failed to spawn gateway: {}\n", .{err});
         return err;

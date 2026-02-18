@@ -1,4 +1,6 @@
 const std = @import("std");
+const json_util = @import("../json_util.zig");
+const http_util = @import("../http_util.zig");
 
 // Re-export all provider sub-modules
 pub const anthropic = @import("anthropic.zig");
@@ -751,7 +753,8 @@ pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_pro
     const api_key = cfg.api_key orelse return error.NoApiKey;
     const url = providerUrl(cfg.default_provider);
     const model = cfg.default_model orelse "anthropic/claude-sonnet-4-5-20250929";
-    const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, cfg.temperature, cfg.max_tokens);
+    const max_tok: u32 = if (cfg.max_tokens) |mt| @intCast(@min(mt, std.math.maxInt(u32))) else 4096;
+    const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, cfg.temperature, max_tok);
     defer allocator.free(body_str);
 
     const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
@@ -797,9 +800,15 @@ pub fn providerUrl(provider_name: []const u8) []const u8 {
 
 /// Build a JSON request body for the legacy complete() function.
 pub fn buildRequestBody(allocator: std.mem.Allocator, model: []const u8, prompt: []const u8, temperature: f64, max_tokens: u32) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        \\{{"model":"{s}","messages":[{{"role":"user","content":"{s}"}}],"temperature":{d:.1},"max_tokens":{d}}}
-    , .{ model, prompt, temperature, max_tokens });
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"model\":");
+    try json_util.appendJsonString(&buf, allocator, model);
+    try w.writeAll(",\"messages\":[{\"role\":\"user\",\"content\":");
+    try json_util.appendJsonString(&buf, allocator, prompt);
+    try std.fmt.format(w, "}}],\"temperature\":{d:.1},\"max_tokens\":{d}}}", .{ temperature, max_tokens });
+    return try buf.toOwnedSlice(allocator);
 }
 
 /// Build a JSON request body with a system prompt (OpenAI-compatible format).
@@ -810,27 +819,18 @@ pub fn buildRequestBodyWithSystem(allocator: std.mem.Allocator, model: []const u
     try w.writeAll("{\"model\":\"");
     try w.writeAll(model);
     try w.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":");
-    try appendJsonString(&buf, allocator, system);
+    try json_util.appendJsonString(&buf, allocator, system);
     try w.writeAll("},{\"role\":\"user\",\"content\":");
-    try appendJsonString(&buf, allocator, prompt);
+    try json_util.appendJsonString(&buf, allocator, prompt);
     try std.fmt.format(w, "}}],\"temperature\":{d:.1},\"max_tokens\":{d}}}", .{ temperature, max_tokens });
     return try buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-    try buf.append(allocator, '"');
-}
+/// Re-export shared JSON string utility (used by sub-modules via `root.appendJsonString`).
+pub const appendJsonString = json_util.appendJsonString;
+
+/// Re-export shared HTTP POST utility (used by sub-modules via `root.curlPost`).
+pub const curlPost = http_util.curlPost;
 
 /// Extract text content from a provider JSON response.
 pub fn extractContent(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
@@ -1414,6 +1414,54 @@ test "Provider.streamChat fallback emits single chunk and final" {
     try std.testing.expect(ctx.got_final);
     try std.testing.expect(ctx.chunks_count == 2);
     try std.testing.expectEqualStrings("hello from fallback", result.content.?);
+}
+
+test "buildRequestBody escapes double quotes in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "say \"hello\"", 0.7, 100);
+    defer allocator.free(body);
+    // Raw quote would break JSON; escaped form must be present
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"hello\\\"") != null);
+    // Verify it's valid JSON
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBody escapes newlines in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "line1\nline2", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBody escapes backslash in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "path\\to\\file", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\\") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBodyWithSystem escapes special chars in both fields" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBodyWithSystem(allocator, "gpt-4o", "sys \"role\"", "user\nprompt", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"role\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "appendJsonString encodes control chars as \\uXXXX" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    // BEL character (0x07) should be encoded as \u0007
+    try json_util.appendJsonString(&buf, allocator, "\x07");
+    try std.testing.expectEqualStrings("\"\\u0007\"", buf.items);
 }
 
 test {

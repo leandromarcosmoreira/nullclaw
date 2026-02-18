@@ -1,6 +1,8 @@
 const std = @import("std");
 const bus = @import("bus.zig");
 
+const log = std.log.scoped(.cron);
+
 pub const JobType = enum {
     shell,
     agent,
@@ -436,7 +438,8 @@ pub const CronScheduler = struct {
                     const result = std.process.Child.run(.{
                         .allocator = self.allocator,
                         .argv = &.{ "sh", "-c", job.command },
-                    }) catch {
+                    }) catch |err| {
+                        log.err("cron job '{s}' failed to start: {}", .{ job.id, err });
                         job.last_status = "error";
                         job.last_run_secs = now;
                         job.last_output = null;

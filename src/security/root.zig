@@ -6,7 +6,7 @@
 //! - PairingGuard: gateway authentication with one-time pairing codes
 //! - SecretStore: ChaCha20-Poly1305 AEAD encryption for API keys on disk
 //! - Sandbox: vtable interface for OS-level isolation backends
-//! - ActionTracker/RateTracker: sliding-window rate limiting
+//! - RateTracker: sliding-window rate limiting (used by SecurityPolicy)
 
 pub const audit = @import("audit.zig");
 pub const policy = @import("policy.zig");
@@ -34,7 +34,6 @@ pub const CommandExecutionLog = audit.CommandExecutionLog;
 pub const AutonomyLevel = policy.AutonomyLevel;
 pub const CommandRiskLevel = policy.CommandRiskLevel;
 pub const SecurityPolicy = policy.SecurityPolicy;
-pub const ActionTracker = policy.ActionTracker;
 
 pub const PairingGuard = pairing.PairingGuard;
 pub const constantTimeEq = pairing.constantTimeEq;

@@ -47,7 +47,7 @@ fn upsertComponent(component: []const u8, update_fn: *const fn (*ComponentHealth
     var ts_buf: [32]u8 = undefined;
     const ts_len = nowTimestamp(&ts_buf);
 
-    const gop = registry_components.getOrPut(std.heap.page_allocator, component) catch return;
+    const gop = registry_components.getOrPut(std.heap.smp_allocator, component) catch return;
     if (!gop.found_existing) {
         gop.value_ptr.* = .{
             .status = "starting",
@@ -82,8 +82,25 @@ pub fn markComponentOk(component: []const u8) void {
 
 /// Mark a component as errored.
 pub fn markComponentError(component: []const u8, err_msg: []const u8) void {
+    registry_mutex.lock();
+    defer registry_mutex.unlock();
+    ensureInit();
+
+    var ts_buf: [32]u8 = undefined;
+    const ts_len = nowTimestamp(&ts_buf);
+
+    // Set pending_error_msg INSIDE the mutex to avoid a race condition.
     pending_error_msg = err_msg;
-    upsertComponent(component, &markErrorUpdate);
+
+    const gop = registry_components.getOrPut(std.heap.smp_allocator, component) catch return;
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{
+            .status = "starting",
+        };
+    }
+    markErrorUpdate(gop.value_ptr, ts_buf, ts_len);
+    gop.value_ptr.updated_at = ts_buf;
+    gop.value_ptr.updated_at_len = ts_len;
 }
 
 /// Bump the restart count for a component.

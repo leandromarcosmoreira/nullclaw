@@ -4,6 +4,7 @@ const ToolResult = @import("root.zig").ToolResult;
 const parseStringField = @import("shell.zig").parseStringField;
 const cron = @import("../cron.zig");
 const CronScheduler = cron.CronScheduler;
+const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronRemove tool — removes a scheduled cron job by its ID.
 pub const CronRemoveTool = struct {
@@ -47,9 +48,10 @@ pub const CronRemoveTool = struct {
         if (job_id.len == 0)
             return ToolResult.fail("Missing required parameter: job_id");
 
-        var scheduler = CronScheduler.init(allocator, 1024, true);
+        var scheduler = loadScheduler(allocator) catch {
+            return ToolResult.fail("Failed to load scheduler state");
+        };
         defer scheduler.deinit();
-        cron.loadJobs(&scheduler) catch {};
 
         if (scheduler.removeJob(job_id)) {
             cron.saveJobs(&scheduler) catch {};

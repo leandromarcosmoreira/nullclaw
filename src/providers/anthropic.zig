@@ -246,7 +246,7 @@ pub const AnthropicProvider = struct {
         const resp_body = if (is_oauth)
             curlPostOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
         else
-            curlPost(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError;
+            root.curlPost(allocator, url, body, &.{ auth_hdr, version_hdr }) catch return error.AnthropicApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -286,7 +286,7 @@ pub const AnthropicProvider = struct {
         const resp_body = if (is_oauth)
             curlPostOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
         else
-            curlPost(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError;
+            root.curlPost(allocator, url, body, &.{ auth_hdr, version_hdr }) catch return error.AnthropicApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -380,7 +380,7 @@ fn buildChatRequestBody(
 
     if (system_prompt) |sys| {
         try buf.appendSlice(allocator, ",\"system\":");
-        try appendJsonString(&buf, allocator, sys);
+        try root.appendJsonString(&buf, allocator, sys);
     }
 
     try buf.appendSlice(allocator, ",\"messages\":[");
@@ -398,7 +398,7 @@ fn buildChatRequestBody(
         try buf.appendSlice(allocator, "{\"role\":\"");
         try buf.appendSlice(allocator, role_str);
         try buf.appendSlice(allocator, "\",\"content\":");
-        try appendJsonString(&buf, allocator, msg.content);
+        try root.appendJsonString(&buf, allocator, msg.content);
         try buf.append(allocator, '}');
     }
 
@@ -439,7 +439,7 @@ fn buildStreamingChatRequestBody(
 
     if (system_prompt) |sys| {
         try buf.appendSlice(allocator, ",\"system\":");
-        try appendJsonString(&buf, allocator, sys);
+        try root.appendJsonString(&buf, allocator, sys);
     }
 
     try buf.appendSlice(allocator, ",\"messages\":[");
@@ -456,7 +456,7 @@ fn buildStreamingChatRequestBody(
         try buf.appendSlice(allocator, "{\"role\":\"");
         try buf.appendSlice(allocator, role_str);
         try buf.appendSlice(allocator, "\",\"content\":");
-        try appendJsonString(&buf, allocator, msg.content);
+        try root.appendJsonString(&buf, allocator, msg.content);
         try buf.append(allocator, '}');
     }
 
@@ -469,60 +469,19 @@ fn buildStreamingChatRequestBody(
     return try buf.toOwnedSlice(allocator);
 }
 
-/// Append a JSON-escaped string (with enclosing quotes) to the buffer.
-fn appendJsonString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try buf.append(allocator, '"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    var escape_buf: [6]u8 = undefined;
-                    const escape = std.fmt.bufPrint(&escape_buf, "\\u{x:0>4}", .{c}) catch unreachable;
-                    try buf.appendSlice(allocator, escape);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-    try buf.append(allocator, '"');
-}
-
-/// HTTP POST via curl subprocess (avoids Zig 0.15 std.http.Client segfaults).
-fn curlPost(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8, extra_hdr: []const u8) ![]u8 {
-    var child = std.process.Child.init(&.{
-        "curl", "-s",                             "-X", "POST",
-        "-H",   "Content-Type: application/json", "-H", auth_hdr,
-        "-H",   extra_hdr,                        "-d", body,
-        url,
-    }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
-
-    const term = child.wait() catch return error.CurlWaitError;
-    if (term != .Exited or term.Exited != 0) return error.CurlFailed;
-
-    return stdout;
-}
-
 /// HTTP POST with OAuth-specific headers (anthropic-beta, user-agent).
 fn curlPostOAuth(allocator: std.mem.Allocator, url: []const u8, body: []const u8, auth_hdr: []const u8, version_hdr: []const u8) ![]u8 {
-    var child = std.process.Child.init(&.{
+    var argv = std.ArrayListUnmanaged([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
         "curl", "-s",                               "-X", "POST",
         "-H",   "Content-Type: application/json",   "-H", auth_hdr,
         "-H",   version_hdr,                        "-H", "anthropic-beta: oauth-2025-04-20",
         "-A",   "claude-cli/2.1.2 (external, cli)", "-d", body,
         url,
-    }, allocator);
+    });
+
+    var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
 

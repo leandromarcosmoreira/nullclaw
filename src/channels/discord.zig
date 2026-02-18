@@ -1,6 +1,8 @@
 const std = @import("std");
 const root = @import("root.zig");
 
+const log = std.log.scoped(.discord);
+
 /// Discord channel — connects via WebSocket gateway, sends via REST API.
 /// Splits messages at 2000 chars (Discord limit).
 pub const DiscordChannel = struct {
@@ -66,44 +68,24 @@ pub const DiscordChannel = struct {
         const url = try sendUrl(&url_buf, channel_id);
 
         // Build JSON body: {"content":"..."}
-        var body_buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&body_buf);
-        const w = fbs.writer();
-        try w.writeAll("{\"content\":\"");
-        for (text) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                else => try w.writeByte(c),
-            }
-        }
-        try w.writeAll("\"}");
-        const body = fbs.getWritten();
+        var body_list: std.ArrayListUnmanaged(u8) = .empty;
+        defer body_list.deinit(self.allocator);
 
-        // Build auth header value: "Bot <token>"
+        try body_list.appendSlice(self.allocator, "{\"content\":");
+        try root.json_util.appendJsonString(&body_list, self.allocator, text);
+        try body_list.appendSlice(self.allocator, "}");
+
+        // Build auth header value: "Authorization: Bot <token>"
         var auth_buf: [512]u8 = undefined;
         var auth_fbs = std.io.fixedBufferStream(&auth_buf);
-        try auth_fbs.writer().print("Bot {s}", .{self.bot_token});
-        const auth_value = auth_fbs.getWritten();
+        try auth_fbs.writer().print("Authorization: Bot {s}", .{self.bot_token});
+        const auth_header = auth_fbs.getWritten();
 
-        var client = std.http.Client{ .allocator = self.allocator };
-        defer client.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .extra_headers = &.{
-                .{ .name = "Content-Type", .value = "application/json" },
-                .{ .name = "Authorization", .value = auth_value },
-            },
-        }) catch return error.DiscordApiError;
-
-        if (result.status != .ok and result.status != .created) {
+        const resp = root.http_util.curlPost(self.allocator, url, body_list.items, &.{auth_header}) catch |err| {
+            log.err("Discord API POST failed: {}", .{err});
             return error.DiscordApiError;
-        }
+        };
+        self.allocator.free(resp);
     }
 
     fn vtableStart(ptr: *anyopaque) anyerror!void {

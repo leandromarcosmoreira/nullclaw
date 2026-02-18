@@ -140,17 +140,9 @@ pub const WhatsAppChannel = struct {
         const w = fbs.writer();
         try w.writeAll("{\"messaging_product\":\"whatsapp\",\"recipient_type\":\"individual\",\"to\":\"");
         try w.writeAll(to);
-        try w.writeAll("\",\"type\":\"text\",\"text\":{\"preview_url\":false,\"body\":\"");
-        for (text) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                else => try w.writeByte(c),
-            }
-        }
-        try w.writeAll("\"}}");
+        try w.writeAll("\",\"type\":\"text\",\"text\":{\"preview_url\":false,\"body\":");
+        try root.appendJsonStringW(w, text);
+        try w.writeAll("}}");
         const body = fbs.getWritten();
 
         // Build auth header
