@@ -51,6 +51,7 @@ pub const DelegateAgentConfig = config_types.DelegateAgentConfig;
 pub const NamedAgentConfig = config_types.NamedAgentConfig;
 pub const McpServerConfig = config_types.McpServerConfig;
 pub const ModelPricing = config_types.ModelPricing;
+pub const ToolsConfig = config_types.ToolsConfig;
 
 // ── Top-level Config ────────────────────────────────────────────
 
@@ -93,6 +94,7 @@ pub const Config = struct {
     peripherals: PeripheralsConfig = .{},
     hardware: HardwareConfig = .{},
     security: SecurityConfig = .{},
+    tools: ToolsConfig = .{},
 
     // Convenience aliases for backward-compat flat access used by other modules.
     // These are set during load() to mirror nested values.
@@ -304,6 +306,14 @@ pub const Config = struct {
         try w.print("    \"enabled\": {s},\n", .{if (self.cost.enabled) "true" else "false"});
         try w.print("    \"daily_limit_usd\": {d:.1},\n", .{self.cost.daily_limit_usd});
         try w.print("    \"monthly_limit_usd\": {d:.1}\n", .{self.cost.monthly_limit_usd});
+        try w.print("  }},\n", .{});
+
+        // Tools
+        try w.print("  \"tools\": {{\n", .{});
+        try w.print("    \"shell_timeout_secs\": {d},\n", .{self.tools.shell_timeout_secs});
+        try w.print("    \"shell_max_output_bytes\": {d},\n", .{self.tools.shell_max_output_bytes});
+        try w.print("    \"max_file_size_bytes\": {d},\n", .{self.tools.max_file_size_bytes});
+        try w.print("    \"web_fetch_max_chars\": {d}\n", .{self.tools.web_fetch_max_chars});
         try w.print("  }},\n", .{});
 
         // Hardware

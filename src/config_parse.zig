@@ -43,6 +43,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
         if (v == .float) self.default_temperature = v.float;
         if (v == .integer) self.default_temperature = @floatFromInt(v.integer);
     }
+    if (root.get("max_tokens")) |v| {
+        if (v == .integer) self.max_tokens = @intCast(v.integer);
+    }
 
     // Model routes
     if (root.get("model_routes")) |v| {
@@ -294,6 +297,33 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (ag.object.get("session_idle_timeout_secs")) |v| {
                 if (v == .integer) self.agent.session_idle_timeout_secs = @intCast(v.integer);
+            }
+            if (ag.object.get("compaction_keep_recent")) |v| {
+                if (v == .integer) self.agent.compaction_keep_recent = @intCast(v.integer);
+            }
+            if (ag.object.get("compaction_max_summary_chars")) |v| {
+                if (v == .integer) self.agent.compaction_max_summary_chars = @intCast(v.integer);
+            }
+            if (ag.object.get("compaction_max_source_chars")) |v| {
+                if (v == .integer) self.agent.compaction_max_source_chars = @intCast(v.integer);
+            }
+        }
+    }
+
+    // Tools
+    if (root.get("tools")) |tl| {
+        if (tl == .object) {
+            if (tl.object.get("shell_timeout_secs")) |v| {
+                if (v == .integer) self.tools.shell_timeout_secs = @intCast(v.integer);
+            }
+            if (tl.object.get("shell_max_output_bytes")) |v| {
+                if (v == .integer) self.tools.shell_max_output_bytes = @intCast(v.integer);
+            }
+            if (tl.object.get("max_file_size_bytes")) |v| {
+                if (v == .integer) self.tools.max_file_size_bytes = @intCast(v.integer);
+            }
+            if (tl.object.get("web_fetch_max_chars")) |v| {
+                if (v == .integer) self.tools.web_fetch_max_chars = @intCast(v.integer);
             }
         }
     }

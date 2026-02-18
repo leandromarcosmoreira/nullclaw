@@ -714,6 +714,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .mcp_tools = mcp_tools,
         .agents = config.agents,
         .fallback_api_key = config.api_key,
+        .tools_config = config.tools,
     }) catch &.{};
     defer if (tools.len > 0) allocator.free(tools);
 

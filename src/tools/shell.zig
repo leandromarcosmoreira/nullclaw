@@ -3,10 +3,10 @@ const Tool = @import("root.zig").Tool;
 const ToolResult = @import("root.zig").ToolResult;
 const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
 
-/// Maximum shell command execution time (nanoseconds).
-const SHELL_TIMEOUT_NS: u64 = 60 * std.time.ns_per_s;
-/// Maximum output size in bytes (1MB).
-const MAX_OUTPUT_BYTES: usize = 1_048_576;
+/// Default maximum shell command execution time (nanoseconds).
+const DEFAULT_SHELL_TIMEOUT_NS: u64 = 60 * std.time.ns_per_s;
+/// Default maximum output size in bytes (1MB).
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
 /// Environment variables safe to pass to shell commands.
 const SAFE_ENV_VARS = [_][]const u8{
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
@@ -16,6 +16,8 @@ const SAFE_ENV_VARS = [_][]const u8{
 pub const ShellTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
+    timeout_ns: u64 = DEFAULT_SHELL_TIMEOUT_NS,
+    max_output_bytes: usize = DEFAULT_MAX_OUTPUT_BYTES,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -104,9 +106,9 @@ pub const ShellTool = struct {
         try child.spawn();
 
         // Read stdout and stderr
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, MAX_OUTPUT_BYTES);
+        const stdout = try child.stdout.?.readToEndAlloc(allocator, self.max_output_bytes);
         defer allocator.free(stdout);
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, MAX_OUTPUT_BYTES);
+        const stderr = try child.stderr.?.readToEndAlloc(allocator, self.max_output_bytes);
         defer allocator.free(stderr);
 
         const term = try child.wait();

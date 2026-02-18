@@ -5,13 +5,14 @@ const parseStringField = @import("shell.zig").parseStringField;
 const isPathSafe = @import("file_edit.zig").isPathSafe;
 const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
 
-/// Maximum file size to read (10MB).
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// Default maximum file size to read (10MB).
+const DEFAULT_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Read file contents with workspace path scoping.
 pub const FileReadTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
+    max_file_size: u64 = DEFAULT_MAX_FILE_SIZE,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -87,17 +88,17 @@ pub const FileReadTool = struct {
         defer file.close();
 
         const stat = try file.stat();
-        if (stat.size > MAX_FILE_SIZE) {
+        if (stat.size > self.max_file_size) {
             const msg = try std.fmt.allocPrint(
                 allocator,
                 "File too large: {} bytes (limit: {} bytes)",
-                .{ stat.size, MAX_FILE_SIZE },
+                .{ stat.size, self.max_file_size },
             );
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         }
 
         // Read contents
-        const contents = file.readToEndAlloc(allocator, MAX_FILE_SIZE) catch |err| {
+        const contents = file.readToEndAlloc(allocator, self.max_file_size) catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "Failed to read file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };

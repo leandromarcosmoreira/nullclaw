@@ -177,18 +177,26 @@ pub fn allTools(
         delegate_depth: u32 = 0,
         subagent_manager: ?*@import("../subagent.zig").SubagentManager = null,
         allowed_paths: []const []const u8 = &.{},
+        tools_config: @import("../config.zig").ToolsConfig = .{},
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
     errdefer list.deinit(allocator);
 
-    // Core tools with workspace_dir + allowed_paths
+    // Core tools with workspace_dir + allowed_paths + tools_config limits
+    const tc = opts.tools_config;
+
     const st = try allocator.create(shell.ShellTool);
-    st.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths };
+    st.* = .{
+        .workspace_dir = workspace_dir,
+        .allowed_paths = opts.allowed_paths,
+        .timeout_ns = tc.shell_timeout_secs * std.time.ns_per_s,
+        .max_output_bytes = tc.shell_max_output_bytes,
+    };
     try list.append(allocator, st.tool());
 
     const ft = try allocator.create(file_read.FileReadTool);
-    ft.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths };
+    ft.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths, .max_file_size = tc.max_file_size_bytes };
     try list.append(allocator, ft.tool());
 
     const wt = try allocator.create(file_write.FileWriteTool);
@@ -196,7 +204,7 @@ pub fn allTools(
     try list.append(allocator, wt.tool());
 
     const et2 = try allocator.create(file_edit.FileEditTool);
-    et2.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths };
+    et2.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths, .max_file_size = tc.max_file_size_bytes };
     try list.append(allocator, et2.tool());
 
     const gt = try allocator.create(git.GitTool);

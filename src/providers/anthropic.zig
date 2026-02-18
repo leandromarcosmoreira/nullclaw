@@ -409,7 +409,7 @@ fn buildChatRequestBody(
     try buf.appendSlice(allocator, model);
     try buf.appendSlice(allocator, "\",\"max_tokens\":");
     var max_buf: [16]u8 = undefined;
-    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{AnthropicProvider.DEFAULT_MAX_TOKENS}) catch return error.AnthropicApiError;
+    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{request.max_tokens}) catch return error.AnthropicApiError;
     try buf.appendSlice(allocator, max_str);
 
     if (system_prompt) |sys| {
@@ -467,8 +467,8 @@ fn buildStreamingChatRequestBody(
     try buf.appendSlice(allocator, "{\"model\":\"");
     try buf.appendSlice(allocator, model);
     try buf.appendSlice(allocator, "\",\"max_tokens\":");
-    var max_buf: [16]u8 = undefined;
-    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{AnthropicProvider.DEFAULT_MAX_TOKENS}) catch return error.AnthropicApiError;
+    var max_buf2: [16]u8 = undefined;
+    const max_str = std.fmt.bufPrint(&max_buf2, "{d}", .{request.max_tokens}) catch return error.AnthropicApiError;
     try buf.appendSlice(allocator, max_str);
 
     if (system_prompt) |sys| {

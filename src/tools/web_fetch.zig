@@ -14,6 +14,8 @@ const DEFAULT_MAX_CHARS: usize = 50_000;
 
 /// Web fetch tool — fetches URLs and extracts readable content.
 pub const WebFetchTool = struct {
+    default_max_chars: usize = DEFAULT_MAX_CHARS,
+
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
         .name = &vtableName,
@@ -47,7 +49,7 @@ pub const WebFetchTool = struct {
         ;
     }
 
-    fn execute(_: *WebFetchTool, allocator: std.mem.Allocator, args_json: []const u8) !ToolResult {
+    fn execute(self: *WebFetchTool, allocator: std.mem.Allocator, args_json: []const u8) !ToolResult {
         const url = parseStringField(args_json, "url") orelse
             return ToolResult.fail("Missing required 'url' parameter");
 
@@ -62,7 +64,7 @@ pub const WebFetchTool = struct {
         if (net_security.isLocalHost(host))
             return ToolResult.fail("Blocked local/private host");
 
-        const max_chars = parseMaxChars(args_json);
+        const max_chars = parseMaxCharsWithDefault(args_json, self.default_max_chars);
 
         // Fetch URL
         var client: std.http.Client = .{ .allocator = allocator };
@@ -127,8 +129,12 @@ pub const WebFetchTool = struct {
 };
 
 fn parseMaxChars(json: []const u8) usize {
-    const s = parseStringField(json, "max_chars") orelse return DEFAULT_MAX_CHARS;
-    const val = std.fmt.parseInt(usize, s, 10) catch return DEFAULT_MAX_CHARS;
+    return parseMaxCharsWithDefault(json, DEFAULT_MAX_CHARS);
+}
+
+fn parseMaxCharsWithDefault(json: []const u8, default: usize) usize {
+    const s = parseStringField(json, "max_chars") orelse return default;
+    const val = std.fmt.parseInt(usize, s, 10) catch return default;
     if (val < 100) return 100;
     if (val > 200_000) return 200_000;
     return val;

@@ -3,8 +3,8 @@ const Tool = @import("root.zig").Tool;
 const ToolResult = @import("root.zig").ToolResult;
 const parseStringField = @import("shell.zig").parseStringField;
 
-/// Maximum file size to read for editing (10MB).
-const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+/// Default maximum file size to read for editing (10MB).
+const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// System-critical prefixes — always blocked even if they match allowed_paths.
 pub const SYSTEM_BLOCKED_PREFIXES = [_][]const u8{
@@ -60,6 +60,7 @@ pub fn isResolvedPathAllowed(
 pub const FileEditTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
+    max_file_size: usize = DEFAULT_MAX_FILE_SIZE,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -138,7 +139,7 @@ pub const FileEditTool = struct {
             const msg = try std.fmt.allocPrint(allocator, "Failed to open file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         };
-        const contents = file_r.readToEndAlloc(allocator, MAX_FILE_SIZE) catch |err| {
+        const contents = file_r.readToEndAlloc(allocator, self.max_file_size) catch |err| {
             file_r.close();
             const msg = try std.fmt.allocPrint(allocator, "Failed to read file: {}", .{err});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };

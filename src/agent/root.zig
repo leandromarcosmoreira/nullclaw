@@ -40,14 +40,14 @@ const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 10;
 /// Maximum non-system messages before trimming.
 const DEFAULT_MAX_HISTORY: u32 = 50;
 
-/// Keep this many most-recent non-system messages after compaction.
-const COMPACTION_KEEP_RECENT: u32 = 20;
+/// Default: keep this many most-recent non-system messages after compaction.
+const DEFAULT_COMPACTION_KEEP_RECENT: u32 = 20;
 
-/// Max characters retained in stored compaction summary.
-const COMPACTION_MAX_SUMMARY_CHARS: usize = 2_000;
+/// Default: max characters retained in stored compaction summary.
+const DEFAULT_COMPACTION_MAX_SUMMARY_CHARS: u32 = 2_000;
 
-/// Max characters in source transcript passed to the summarizer.
-const COMPACTION_MAX_SOURCE_CHARS: usize = 12_000;
+/// Default: max characters in source transcript passed to the summarizer.
+const DEFAULT_COMPACTION_MAX_SOURCE_CHARS: u32 = 12_000;
 
 /// Default token limit for context window (used by token-based compaction trigger).
 pub const DEFAULT_TOKEN_LIMIT: u64 = 128_000;
@@ -77,6 +77,10 @@ pub const Agent = struct {
     max_history_messages: u32,
     auto_save: bool,
     token_limit: u64 = 0,
+    max_tokens: u32 = 4096,
+    compaction_keep_recent: u32 = DEFAULT_COMPACTION_KEEP_RECENT,
+    compaction_max_summary_chars: u32 = DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
+    compaction_max_source_chars: u32 = DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
 
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
@@ -142,6 +146,10 @@ pub const Agent = struct {
             .max_history_messages = cfg.agent.max_history_messages,
             .auto_save = cfg.memory.auto_save,
             .token_limit = cfg.agent.token_limit,
+            .max_tokens = cfg.max_tokens,
+            .compaction_keep_recent = cfg.agent.compaction_keep_recent,
+            .compaction_max_summary_chars = cfg.agent.compaction_max_summary_chars,
+            .compaction_max_source_chars = cfg.agent.compaction_max_source_chars,
             .history = .empty,
             .total_tokens = 0,
             .has_system_prompt = false,
@@ -178,11 +186,11 @@ pub const Agent = struct {
             try buf.append(self.allocator, '\n');
 
             // Safety cap
-            if (buf.items.len > COMPACTION_MAX_SOURCE_CHARS) break;
+            if (buf.items.len > self.compaction_max_source_chars) break;
         }
 
-        if (buf.items.len > COMPACTION_MAX_SOURCE_CHARS) {
-            buf.items.len = COMPACTION_MAX_SOURCE_CHARS;
+        if (buf.items.len > self.compaction_max_source_chars) {
+            buf.items.len = self.compaction_max_source_chars;
         }
 
         return buf.toOwnedSlice(self.allocator);
@@ -226,7 +234,7 @@ pub const Agent = struct {
             0.2,
         ) catch {
             // Fallback: use a local truncation of the transcript
-            const max_len = @min(transcript.len, COMPACTION_MAX_SUMMARY_CHARS);
+            const max_len = @min(transcript.len, self.compaction_max_summary_chars);
             return try self.allocator.dupe(u8, transcript[0..max_len]);
         };
         // Free response's heap-allocated fields after extracting what we need
@@ -241,7 +249,7 @@ pub const Agent = struct {
         }
 
         const raw_summary = summary_resp.contentOrEmpty();
-        const max_len = @min(raw_summary.len, COMPACTION_MAX_SUMMARY_CHARS);
+        const max_len = @min(raw_summary.len, self.compaction_max_summary_chars);
         return try self.allocator.dupe(u8, raw_summary[0..max_len]);
     }
 
@@ -264,7 +272,7 @@ pub const Agent = struct {
 
         if (!count_trigger and !token_trigger) return false;
 
-        const keep_recent = @min(COMPACTION_KEEP_RECENT, @as(u32, @intCast(non_system_count)));
+        const keep_recent = @min(self.compaction_keep_recent, @as(u32, @intCast(non_system_count)));
         const compact_count = non_system_count - keep_recent;
         if (compact_count == 0) return false;
 
@@ -290,8 +298,8 @@ pub const Agent = struct {
             );
 
             // Truncate if too long
-            if (merged.len > COMPACTION_MAX_SUMMARY_CHARS) {
-                const truncated = try self.allocator.dupe(u8, merged[0..COMPACTION_MAX_SUMMARY_CHARS]);
+            if (merged.len > self.compaction_max_summary_chars) {
+                const truncated = try self.allocator.dupe(u8, merged[0..self.compaction_max_summary_chars]);
                 self.allocator.free(merged);
                 break :blk truncated;
             }
@@ -496,6 +504,7 @@ pub const Agent = struct {
                         .messages = messages,
                         .model = self.model_name,
                         .temperature = self.temperature,
+                        .max_tokens = self.max_tokens,
                         .tools = null,
                     },
                     self.model_name,
@@ -527,6 +536,7 @@ pub const Agent = struct {
                         .messages = messages,
                         .model = self.model_name,
                         .temperature = self.temperature,
+                        .max_tokens = self.max_tokens,
                         .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                     },
                     self.model_name,
@@ -551,6 +561,7 @@ pub const Agent = struct {
                             .messages = messages,
                             .model = self.model_name,
                             .temperature = self.temperature,
+                            .max_tokens = self.max_tokens,
                             .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                         },
                         self.model_name,
@@ -567,6 +578,7 @@ pub const Agent = struct {
                                     .messages = recovery_msgs,
                                     .model = self.model_name,
                                     .temperature = self.temperature,
+                                    .max_tokens = self.max_tokens,
                                     .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                                 },
                                 self.model_name,
@@ -980,6 +992,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .mcp_tools = mcp_tools,
         .agents = cfg.agents,
         .fallback_api_key = cfg.api_key,
+        .tools_config = cfg.tools,
     });
     defer allocator.free(tools);
 

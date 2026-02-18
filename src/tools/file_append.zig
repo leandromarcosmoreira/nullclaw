@@ -10,13 +10,14 @@ const parseStringField = @import("shell.zig").parseStringField;
 const isPathSafe = @import("file_edit.zig").isPathSafe;
 const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
 
-/// Maximum file size to read before appending (10MB).
-const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+/// Default maximum file size to read before appending (10MB).
+const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Append content to the end of a file with workspace path scoping.
 pub const FileAppendTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
+    max_file_size: usize = DEFAULT_MAX_FILE_SIZE,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -92,7 +93,7 @@ pub const FileAppendTool = struct {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to open file: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
-            const data = file.readToEndAlloc(allocator, MAX_FILE_SIZE) catch |err| {
+            const data = file.readToEndAlloc(allocator, self.max_file_size) catch |err| {
                 file.close();
                 const msg = try std.fmt.allocPrint(allocator, "Failed to read file: {}", .{err});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };

@@ -95,6 +95,16 @@ pub const AgentConfig = struct {
     tool_dispatcher: []const u8 = "auto",
     token_limit: u64 = 128_000,
     session_idle_timeout_secs: u64 = 1800, // evict idle sessions after 30 min
+    compaction_keep_recent: u32 = 20,
+    compaction_max_summary_chars: u32 = 2_000,
+    compaction_max_source_chars: u32 = 12_000,
+};
+
+pub const ToolsConfig = struct {
+    shell_timeout_secs: u64 = 60,
+    shell_max_output_bytes: u32 = 1_048_576, // 1MB
+    max_file_size_bytes: u32 = 10_485_760, // 10MB — shared file_read/edit/append
+    web_fetch_max_chars: u32 = 50_000,
 };
 
 pub const ModelRouteConfig = struct {
