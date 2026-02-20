@@ -654,11 +654,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     const telegram_config = config.channels.telegram orelse {
         std.debug.print("Telegram not configured. Add to config.json:\n", .{});
-        std.debug.print("  \"channels\": {{ \"telegram\": {{ \"bot_token\": \"...\" }} }}\n", .{});
+        std.debug.print("  \"channels\": {{\"telegram\": {{\"accounts\": {{\"main\": {{\"bot_token\": \"...\"}}}}}}}}\n", .{});
         std.process.exit(1);
     };
 
-    // Determine allowed users: --user CLI args override config allowed_users
+    // Determine allowed users: --user CLI args override config allow_from
     var user_list: std.ArrayList([]const u8) = .empty;
     defer user_list.deinit(allocator);
     {
@@ -673,7 +673,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     const allowed: []const []const u8 = if (user_list.items.len > 0)
         user_list.items
     else
-        telegram_config.allowed_users;
+        telegram_config.allow_from;
 
     if (config.defaultProviderKey() == null) {
         std.debug.print("No API key configured. Add to ~/.nullclaw/config.json:\n", .{});
@@ -703,12 +703,12 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     var tg = yc.channels.telegram.TelegramChannel.init(allocator, telegram_config.bot_token, allowed);
     tg.proxy = telegram_config.proxy;
 
-    // Set up transcription — key comes from providers.{transcription.provider}
-    const trans = config.transcription;
+    // Set up transcription — key comes from providers.{audio_media.provider}
+    const trans = config.audio_media;
     const whisper_ptr: ?*yc.voice.WhisperTranscriber = if (config.getProviderKey(trans.provider)) |key| blk: {
         const wt = try allocator.create(yc.voice.WhisperTranscriber);
         wt.* = .{
-            .endpoint = yc.voice.resolveTranscriptionEndpoint(trans.provider, trans.endpoint),
+            .endpoint = yc.voice.resolveTranscriptionEndpoint(trans.provider, trans.base_url),
             .api_key = key,
             .model = trans.model,
             .language = trans.language,

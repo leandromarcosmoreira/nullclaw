@@ -175,18 +175,18 @@ pub fn runTelegramLoop(
     // Heap-alloc TelegramChannel for vtable pointer stability
     const tg_ptr = allocator.create(telegram.TelegramChannel) catch return;
     defer allocator.destroy(tg_ptr);
-    tg_ptr.* = telegram.TelegramChannel.init(allocator, telegram_config.bot_token, telegram_config.allowed_users);
+    tg_ptr.* = telegram.TelegramChannel.init(allocator, telegram_config.bot_token, telegram_config.allow_from);
     tg_ptr.proxy = telegram_config.proxy;
 
-    // Set up transcription — key comes from providers.{transcription.provider}
-    const trans = config.transcription;
+    // Set up transcription — key comes from providers.{audio_media.provider}
+    const trans = config.audio_media;
     if (config.getProviderKey(trans.provider)) |key| {
         const wt = allocator.create(voice.WhisperTranscriber) catch {
             log.warn("Failed to allocate WhisperTranscriber", .{});
             return;
         };
         wt.* = .{
-            .endpoint = voice.resolveTranscriptionEndpoint(trans.provider, trans.endpoint),
+            .endpoint = voice.resolveTranscriptionEndpoint(trans.provider, trans.base_url),
             .api_key = key,
             .model = trans.model,
             .language = trans.language,

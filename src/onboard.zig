@@ -431,7 +431,7 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
         for (cfg.providers) |e| {
             allocator.free(e.name);
             if (e.api_key) |k| allocator.free(k);
-            if (e.api_base) |b| allocator.free(b);
+            if (e.base_url) |b| allocator.free(b);
         }
         if (cfg.providers.len > 0) allocator.free(cfg.providers);
         // Store in providers section for the default provider
@@ -599,7 +599,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         for (cfg.providers) |e| {
             allocator.free(e.name);
             if (e.api_key) |k| allocator.free(k);
-            if (e.api_base) |b| allocator.free(b);
+            if (e.base_url) |b| allocator.free(b);
         }
         if (cfg.providers.len > 0) allocator.free(cfg.providers);
         const entries = try allocator.alloc(config_mod.ProviderEntry, 1);
