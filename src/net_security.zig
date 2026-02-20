@@ -22,11 +22,44 @@ pub fn extractHost(url: []const u8) ?[]const u8 {
             break;
         }
     }
-    const authority = rest[0..end];
+    var authority = rest[0..end];
     if (authority.len == 0) return null;
 
-    // Strip port
+    // Strip optional userinfo ("user[:pass]@")
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+        if (at + 1 >= authority.len) return null;
+        authority = authority[at + 1 ..];
+    }
+    if (authority.len == 0) return null;
+
+    // Bracketed IPv6 authority: [::1] or [::1]:443
+    if (authority[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+        const host = authority[0 .. close + 1];
+        if (close + 1 == authority.len) return host;
+
+        // Only ':<digits>' is valid after bracketed host
+        if (authority[close + 1] != ':') return null;
+        const port = authority[close + 2 ..];
+        if (port.len == 0) return null;
+        for (port) |c| {
+            if (c < '0' or c > '9') return null;
+        }
+        return host;
+    }
+
+    // Unbracketed host may have optional :port (single colon only).
     if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        // If multiple colons are present, treat as raw host text (e.g. ::1).
+        if (std.mem.indexOfScalar(u8, authority, ':') != colon) {
+            return authority;
+        }
+
+        const port = authority[colon + 1 ..];
+        if (port.len == 0) return null;
+        for (port) |c| {
+            if (c < '0' or c > '9') return authority;
+        }
         return authority[0..colon];
     }
     return authority;
@@ -283,6 +316,21 @@ test "extractHost basic" {
 
 test "extractHost with port" {
     try std.testing.expectEqualStrings("localhost", extractHost("http://localhost:8080/api").?);
+}
+
+test "extractHost strips userinfo safely" {
+    try std.testing.expectEqualStrings("127.0.0.1", extractHost("http://user:pass@127.0.0.1/admin").?);
+    try std.testing.expectEqualStrings("example.com", extractHost("https://user@example.com/path").?);
+}
+
+test "extractHost handles bracketed ipv6" {
+    try std.testing.expectEqualStrings("[::1]", extractHost("http://[::1]:8080/api").?);
+    try std.testing.expectEqualStrings("[2607:f8b0::1]", extractHost("https://[2607:f8b0::1]/").?);
+}
+
+test "extractHost rejects invalid bracketed authority" {
+    try std.testing.expect(extractHost("http://[::1") == null);
+    try std.testing.expect(extractHost("http://[::1]x/path") == null);
 }
 
 test "extractHost returns null for non-http scheme" {
