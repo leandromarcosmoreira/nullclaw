@@ -444,7 +444,10 @@ fn hasParentDirComponent(path: []const u8) bool {
 /// page_allocator (acceptable since daemon mode is not yet supported there).
 fn expandTilde(path: []const u8, buf: []u8) []const u8 {
     if (path.len < 2 or path[0] != '~') return path;
-    const is_sep = path[1] == '/' or (comptime @import("builtin").os.tag == .windows and path[1] == '\\');
+    const is_sep = if (comptime @import("builtin").os.tag == .windows)
+        (path[1] == '/' or path[1] == '\\')
+    else
+        path[1] == '/';
     if (!is_sep) return path;
 
     if (comptime @import("builtin").os.tag == .windows) {
