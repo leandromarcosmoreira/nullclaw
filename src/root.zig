@@ -21,6 +21,7 @@ pub const onboard = @import("onboard.zig");
 pub const doctor = @import("doctor.zig");
 pub const service = @import("service.zig");
 pub const daemon = @import("daemon.zig");
+pub const channel_loop = @import("channel_loop.zig");
 pub const migration = @import("migration.zig");
 
 // Phase 2: Agent core
