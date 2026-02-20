@@ -383,6 +383,14 @@ src/
   ...
 ```
 
+## Versioning
+
+nullclaw uses **CalVer** (`YYYY.M.D`) for releases — e.g. `v2026.2.20`.
+
+- **Tag format:** `vYYYY.M.D` (one release per day max; patch suffix `vYYYY.M.D.N` if needed)
+- **No stability guarantees yet** — the project is pre-1.0, config and CLI may change between releases
+- **`nullclaw --version`** prints the current version
+
 ## Contributing
 
 Implement a vtable interface, submit a PR:
