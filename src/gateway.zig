@@ -19,6 +19,7 @@ const tools_mod = @import("tools/root.zig");
 const memory_mod = @import("memory/root.zig");
 const observability = @import("observability.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
+const channels = @import("channels/root.zig");
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -206,6 +207,7 @@ pub const GatewayState = struct {
     idempotency: IdempotencyStore,
     whatsapp_verify_token: []const u8,
     whatsapp_app_secret: []const u8,
+    whatsapp_access_token: []const u8,
     telegram_bot_token: []const u8,
     pairing_guard: ?PairingGuard,
 
@@ -220,6 +222,7 @@ pub const GatewayState = struct {
             .idempotency = IdempotencyStore.init(300),
             .whatsapp_verify_token = verify_token,
             .whatsapp_app_secret = "",
+            .whatsapp_access_token = "",
             .telegram_bot_token = "",
             .pairing_guard = null,
         };
@@ -646,6 +649,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
         if (cfg.channels.whatsapp) |wa_cfg| {
             state.whatsapp_verify_token = wa_cfg.verify_token;
             state.whatsapp_app_secret = wa_cfg.app_secret orelse "";
+            state.whatsapp_access_token = wa_cfg.access_token;
         }
 
         // Resolve API key: config providers first, then env vars
@@ -957,7 +961,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
                         // Signature valid — proceed with message processing
                         const body = if (body_for_sig.len > 0) body_for_sig else null;
                         if (body) |b| {
-                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
+                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body") orelse
+                                channels.whatsapp.downloadMediaFromPayload(req_allocator, state.whatsapp_access_token, b);
                             if (msg_text) |mt| {
                                 if (session_mgr_opt) |*sm| {
                                     const reply: ?[]const u8 = sm.processMessage("whatsapp", mt) catch |err| blk: {
@@ -985,7 +990,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
                         const body = extractBody(raw);
                         if (body) |b| {
                             // Try to extract message text from WhatsApp payload
-                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
+                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body") orelse
+                                channels.whatsapp.downloadMediaFromPayload(req_allocator, state.whatsapp_access_token, b);
                             if (msg_text) |mt| {
                                 if (session_mgr_opt) |*sm| {
                                     const reply: ?[]const u8 = sm.processMessage("whatsapp", mt) catch |err| blk: {

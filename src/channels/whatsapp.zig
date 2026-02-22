@@ -116,6 +116,74 @@ pub const WhatsAppChannel = struct {
         return result.toOwnedSlice(allocator);
     }
 
+    /// Fetches an image media from WhatsApp Cloud API using its ID, saves it to a temp file,
+    /// and returns the path formatted as `[IMAGE:/path]`.
+    pub fn downloadMediaFromPayload(allocator: std.mem.Allocator, access_token: []const u8, payload: []const u8) ?[]const u8 {
+        if (access_token.len == 0) return null;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch return null;
+        defer parsed.deinit();
+
+        // Navigate to the image ID
+        const val = parsed.value;
+        const entries = (val.object.get("entry") orelse return null).array.items;
+        if (entries.len == 0) return null;
+        const changes = (entries[0].object.get("changes") orelse return null).array.items;
+        if (changes.len == 0) return null;
+        const value_obj = (changes[0].object.get("value") orelse return null).object;
+        const messages = (value_obj.get("messages") orelse return null).array.items;
+        if (messages.len == 0) return null;
+        const msg = messages[0].object;
+
+        const img_obj = msg.get("image") orelse return null;
+        const id_val = img_obj.object.get("id") orelse return null;
+        if (id_val != .string) return null;
+        const media_id = id_val.string;
+
+        // Step 1: Get media URL
+        var url_buf: [256]u8 = undefined;
+        const info_url = std.fmt.bufPrint(&url_buf, "https://graph.facebook.com/{s}/{s}", .{ API_VERSION, media_id }) catch return null;
+
+        var auth_buf: [512]u8 = undefined;
+        const auth_header = std.fmt.bufPrint(&auth_buf, "Authorization: Bearer {s}", .{access_token}) catch return null;
+
+        const info_resp = root.http_util.curlGet(allocator, info_url, &.{auth_header}, "10") catch return null;
+        defer allocator.free(info_resp);
+
+        var info_parsed = std.json.parseFromSlice(std.json.Value, allocator, info_resp, .{}) catch return null;
+        defer info_parsed.deinit();
+
+        const url_val = info_parsed.value.object.get("url") orelse return null;
+        if (url_val != .string) return null;
+        const media_url = url_val.string;
+
+        // Step 2: Download media bytes
+        const media_resp = root.http_util.curlGet(allocator, media_url, &.{auth_header}, "30") catch return null;
+        defer allocator.free(media_resp);
+
+        // Step 3: Write to tmp file
+        var rand = std.crypto.random;
+        var path_buf: [1024]u8 = undefined;
+        const local_path = std.fmt.bufPrint(&path_buf, "/tmp/whatsapp_{x}.dat", .{rand.int(u64)}) catch return null;
+
+        if (std.fs.createFileAbsolute(local_path, .{ .read = false })) |file| {
+            file.writeAll(media_resp) catch {
+                file.close();
+                return null;
+            };
+            file.close();
+
+            // Format as [IMAGE:path]
+            var out_buf: std.ArrayListUnmanaged(u8) = .empty;
+            out_buf.appendSlice(allocator, "[IMAGE:") catch return null;
+            out_buf.appendSlice(allocator, local_path) catch return null;
+            out_buf.appendSlice(allocator, "]") catch return null;
+            return out_buf.toOwnedSlice(allocator) catch null;
+        } else |_| {
+            return null;
+        }
+    }
+
     pub fn healthCheck(_: *WhatsAppChannel) bool {
         return true;
     }

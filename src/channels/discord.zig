@@ -641,6 +641,59 @@ pub const DiscordChannel = struct {
             }
         }
 
+        // Process attachments (if any)
+        var content_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer content_buf.deinit(self.allocator);
+
+        if (content.len > 0) {
+            content_buf.appendSlice(self.allocator, content) catch {};
+        }
+
+        if (d_obj.get("attachments")) |att_val| {
+            if (att_val == .array) {
+                var rand = std.crypto.random;
+                for (att_val.array.items) |att_item| {
+                    if (att_item == .object) {
+                        if (att_item.object.get("url")) |url_val| {
+                            if (url_val == .string) {
+                                const attach_url = url_val.string;
+
+                                // Download it
+                                if (root.http_util.curlGet(self.allocator, attach_url, &.{}, "30")) |img_data| {
+                                    defer self.allocator.free(img_data);
+
+                                    // Make temp file
+                                    const rand_id = rand.int(u64);
+                                    var path_buf: [1024]u8 = undefined;
+                                    const local_path = std.fmt.bufPrint(&path_buf, "/tmp/discord_{x}.dat", .{rand_id}) catch continue;
+
+                                    if (std.fs.createFileAbsolute(local_path, .{ .read = false })) |file| {
+                                        file.writeAll(img_data) catch {
+                                            file.close();
+                                            continue;
+                                        };
+                                        file.close();
+
+                                        if (content_buf.items.len > 0) content_buf.appendSlice(self.allocator, "\n") catch {};
+                                        content_buf.appendSlice(self.allocator, "[IMAGE:") catch {};
+                                        content_buf.appendSlice(self.allocator, local_path) catch {};
+                                        content_buf.appendSlice(self.allocator, "]") catch {};
+                                    } else |_| {}
+                                } else |err| {
+                                    log.warn("Discord: failed to download attachment: {}", .{err});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const final_content = content_buf.toOwnedSlice(self.allocator) catch blk: {
+            break :blk try self.allocator.dupe(u8, content);
+        };
+        defer self.allocator.free(final_content);
+
         // Build session_key and publish to bus
         const session_key = try std.fmt.allocPrint(self.allocator, "discord:{s}", .{channel_id});
         defer self.allocator.free(session_key);
@@ -650,7 +703,7 @@ pub const DiscordChannel = struct {
             "discord",
             author_id,
             channel_id,
-            content,
+            final_content,
             session_key,
             &.{},
             null,

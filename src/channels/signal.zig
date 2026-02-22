@@ -201,7 +201,7 @@ pub const SignalChannel = struct {
         dm_message: ?[]const u8,
         dm_timestamp: ?u64,
         dm_group_id: ?[]const u8,
-        dm_has_attachments: bool,
+        dm_attachment_ids: []const []const u8,
     ) !?root.ChannelMessage {
         // Skip story messages when configured.
         if (self.ignore_stories and has_story_message) return null;
@@ -210,18 +210,10 @@ pub const SignalChannel = struct {
         const has_message_text = if (dm_message) |m| m.len > 0 else false;
 
         // If there's no data message content to process at all, skip.
-        if (!has_message_text and !dm_has_attachments) return null;
+        if (!has_message_text and dm_attachment_ids.len == 0) return null;
 
         // Skip attachment-only messages when configured.
-        if (self.ignore_attachments and dm_has_attachments and !has_message_text) return null;
-
-        // Determine message text.
-        const text: []const u8 = if (has_message_text)
-            dm_message.?
-        else if (dm_has_attachments)
-            "[Attachment]"
-        else
-            return null;
+        if (self.ignore_attachments and dm_attachment_ids.len > 0 and !has_message_text) return null;
 
         // Effective sender: prefer source_number (E.164), fall back to source (UUID).
         const sender_raw = source_number orelse source orelse return null;
@@ -234,6 +226,38 @@ pub const SignalChannel = struct {
         if (dm_group_id) |gid| {
             if (!self.isGroupAllowed(gid)) return null;
         }
+
+        // Determine message text and fetch attachments.
+        var text_buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer text_buf.deinit(allocator);
+
+        if (has_message_text) {
+            try text_buf.appendSlice(allocator, dm_message.?);
+        }
+
+        if (!self.ignore_attachments and dm_attachment_ids.len > 0) {
+            const is_group = dm_group_id != null;
+            const target_id = dm_group_id orelse sender_raw;
+            for (dm_attachment_ids) |att_id| {
+                if (try self.fetchAttachmentLocally(allocator, att_id, is_group, target_id)) |local_path| {
+                    if (text_buf.items.len > 0) try text_buf.appendSlice(allocator, "\n");
+                    try text_buf.appendSlice(allocator, "[IMAGE:");
+                    try text_buf.appendSlice(allocator, local_path);
+                    try text_buf.appendSlice(allocator, "]");
+                } else {
+                    if (text_buf.items.len > 0) try text_buf.appendSlice(allocator, "\n");
+                    try text_buf.appendSlice(allocator, "[Attachment]");
+                }
+            }
+        } else if (dm_attachment_ids.len > 0) {
+            if (text_buf.items.len > 0) try text_buf.appendSlice(allocator, "\n");
+            try text_buf.appendSlice(allocator, "[Attachment]");
+        }
+
+        if (text_buf.items.len == 0) return null;
+        const text = try text_buf.toOwnedSlice(allocator);
+        errdefer allocator.free(text);
+
 
         // Build reply target.
         const reply_target_str = if (dm_group_id) |gid| blk: {
@@ -254,7 +278,7 @@ pub const SignalChannel = struct {
         const msg = root.ChannelMessage{
             .id = try allocator.dupe(u8, sender_raw),
             .sender = try allocator.dupe(u8, sender_raw),
-            .content = try allocator.dupe(u8, text),
+            .content = text,
             .channel = "signal",
             .timestamp = timestamp,
             .reply_target = reply_target_str,
@@ -263,6 +287,72 @@ pub const SignalChannel = struct {
         };
 
         return msg;
+    }
+
+    // ── JSON-RPC Attachment Fetch ───────────────────────────────────
+
+    /// Fetch an attachment from the signal-cli daemon via JSON-RPC.
+    /// Returns absolute path to a saved temp file.
+    pub fn fetchAttachmentLocally(self: *const SignalChannel, allocator: std.mem.Allocator, attachment_id: []const u8, is_group: bool, target_id: []const u8) !?[]const u8 {
+        var body: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer body.deinit(allocator);
+
+        try body.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"getAttachment\",\"params\":{\"id\":");
+        try root.json_util.appendJsonString(&body, allocator, attachment_id);
+
+        if (is_group) {
+            try body.appendSlice(allocator, ",\"groupId\":");
+            try root.json_util.appendJsonString(&body, allocator, target_id);
+        } else {
+            try body.appendSlice(allocator, ",\"recipient\":");
+            try root.json_util.appendJsonString(&body, allocator, target_id);
+        }
+
+        try body.appendSlice(allocator, ",\"account\":");
+        try root.json_util.appendJsonString(&body, allocator, self.account);
+        try body.appendSlice(allocator, "},\"id\":\"2\"}");
+
+        var url_buf: [1024]u8 = undefined;
+        const url = try self.rpcUrl(&url_buf);
+
+        const rpc_body = try body.toOwnedSlice(allocator);
+        defer allocator.free(rpc_body);
+
+        const resp = root.http_util.curlPost(allocator, url, rpc_body, &.{}) catch |err| {
+            log.warn("Signal fetch attachment {s} failed: {}", .{ attachment_id, err });
+            return null;
+        };
+        defer allocator.free(resp);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, resp, .{}) catch return null;
+        defer parsed.deinit();
+
+        const result = parsed.value.object.get("result") orelse {
+            if (parsed.value.object.get("error")) |err_val| {
+                log.warn("Signal fetch attachment error: {}", .{err_val});
+            }
+            return null;
+        };
+        const data_str = result.object.get("data") orelse return null;
+        if (data_str != .string) return null;
+
+        const base64_data = data_str.string;
+        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(base64_data);
+        const decoded = try allocator.alloc(u8, decoded_len);
+        defer allocator.free(decoded);
+        try std.base64.standard.Decoder.decode(decoded, base64_data);
+
+        // Generate temp file
+        var rand = std.crypto.random;
+        const rand_id = rand.int(u64);
+        var path_buf: [1024]u8 = undefined;
+        const local_path = try std.fmt.bufPrint(&path_buf, "/tmp/signal_{x}.dat", .{rand_id});
+
+        var file = std.fs.createFileAbsolute(local_path, .{ .read = false }) catch return null;
+        defer file.close();
+        try file.writeAll(decoded);
+
+        return try allocator.dupe(u8, local_path);
     }
 
     // ── JSON-RPC Send ───────────────────────────────────────────────
@@ -383,7 +473,8 @@ pub const SignalChannel = struct {
         var dm_message: ?[]const u8 = null;
         var dm_timestamp: ?u64 = null;
         var dm_group_id: ?[]const u8 = null;
-        var dm_has_attachments = false;
+        var dm_attachment_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer dm_attachment_ids.deinit(self.allocator);
 
         // Check for story message
         if (env_obj.get("storyMessage")) |story| {
@@ -414,7 +505,15 @@ pub const SignalChannel = struct {
                 }
             }
             if (dm_obj.get("attachments")) |att| {
-                if (att == .array) dm_has_attachments = att.array.items.len > 0;
+                if (att == .array) {
+                    for (att.array.items) |item| {
+                        if (item == .object) {
+                            if (item.object.get("id")) |id_val| {
+                                if (id_val == .string) try dm_attachment_ids.append(self.allocator, id_val.string);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -428,7 +527,7 @@ pub const SignalChannel = struct {
             dm_message,
             dm_timestamp,
             dm_group_id,
-            dm_has_attachments,
+            dm_attachment_ids.items,
         );
     }
 
@@ -1143,7 +1242,7 @@ test "process envelope valid dm" {
         "Hello!", // dm_message
         1_700_000_000_000, // dm_timestamp
         null, // dm_group_id
-        false, // dm_has_attachments
+        &.{}, // dm_attachment_ids
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1176,7 +1275,7 @@ test "process envelope denied sender" {
         "Hello!",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1202,7 +1301,7 @@ test "process envelope empty message" {
         "", // empty message
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1228,7 +1327,7 @@ test "process envelope no data message" {
         null, // no data message
         null,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1255,7 +1354,7 @@ test "process envelope skips stories" {
         "story text",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1282,7 +1381,7 @@ test "process envelope stories not skipped when disabled" {
         "story with text",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1312,7 +1411,7 @@ test "process envelope skips attachment only" {
         null, // no text
         1000,
         null,
-        true, // has attachments
+        &.{"dummy_id"}, // has attachments
     );
     try std.testing.expect(msg == null);
 }
@@ -1339,7 +1438,7 @@ test "process envelope attachment with text not skipped" {
         "Check this out", // has text
         1000,
         null,
-        true, // also has attachments
+        &.{"dummy_id"}, // also has attachments
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1369,7 +1468,7 @@ test "process envelope attachment only not skipped when ignore disabled" {
         null, // no text
         1000,
         null,
-        true, // has attachments
+        &.{"dummy_id"}, // has attachments
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1398,7 +1497,7 @@ test "process envelope source name sets first name" {
         "Hey",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1427,7 +1526,7 @@ test "process envelope empty source name not set" {
         "Hey",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1456,7 +1555,7 @@ test "process envelope no source name not set" {
         "hi",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1486,7 +1585,7 @@ test "process envelope dm accepted with empty allowed groups" {
         "Hello!",
         1000,
         null, // no group
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1516,7 +1615,7 @@ test "process envelope group denied with empty allowed groups" {
         "hi",
         1000,
         "group123", // group message
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1543,7 +1642,7 @@ test "process envelope group accepted when in allowed groups" {
         "hi",
         1000,
         "group123", // allowed group
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1562,7 +1661,7 @@ test "process envelope group accepted when in allowed groups" {
         "hi",
         1000,
         "other_group", // not in allowed groups
-        false,
+        &.{},
     );
     try std.testing.expect(msg2 == null);
 }
@@ -1589,7 +1688,7 @@ test "process envelope group not in allowed groups" {
         "Hi",
         1000,
         "other_group",
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
@@ -1616,7 +1715,7 @@ test "process envelope uuid sender dm" {
         "Hello from privacy user",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1658,7 +1757,7 @@ test "process envelope uuid sender in group" {
         "Group msg from privacy user",
         1000,
         "testgroup",
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1695,7 +1794,7 @@ test "process envelope dm has no is_group flag" {
         "DM",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1725,7 +1824,7 @@ test "process envelope group sets is_group" {
         "Group msg",
         1000,
         "grp999",
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1755,7 +1854,7 @@ test "process envelope uses data message timestamp" {
         "hi",
         9999, // dm_timestamp (should take priority)
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1784,7 +1883,7 @@ test "process envelope falls back to envelope timestamp" {
         "hi",
         null, // no dm_timestamp
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1813,7 +1912,7 @@ test "process envelope generates timestamp when missing" {
         "hi",
         null, // no dm_timestamp
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1843,7 +1942,7 @@ test "process envelope sender prefers source number" {
         "hi",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1873,7 +1972,7 @@ test "process envelope sender falls back to source" {
         "hi",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg != null);
     const m = msg.?;
@@ -1902,7 +2001,7 @@ test "process envelope sender none when both missing" {
         "hi",
         1000,
         null,
-        false,
+        &.{},
     );
     try std.testing.expect(msg == null);
 }
