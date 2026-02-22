@@ -723,9 +723,13 @@ test "prepareMessagesForProvider skips assistant messages" {
 }
 
 test "readLocalImage rejects path traversal via allowed_dirs" {
-    // ".." is resolved by realpathAlloc; the resolved path won't match allowed_dirs
-    const err = readLocalImage(std.testing.allocator, "/tmp/../etc/passwd", .{});
-    try std.testing.expectError(error.LocalReadNotAllowed, err);
+    // On Unix: realpathAlloc resolves ".." -> path doesn't match empty allowed_dirs -> LocalReadNotAllowed
+    // On Windows: /tmp doesn't exist -> realpathAlloc fails -> PathNotFound
+    if (readLocalImage(std.testing.allocator, "/tmp/../etc/passwd", .{})) |_| {
+        @panic("expected readLocalImage to fail for traversal path");
+    } else |err| {
+        try std.testing.expect(err == error.LocalReadNotAllowed or err == error.PathNotFound);
+    }
 }
 
 test "readLocalImage rejects when no allowed_dirs" {
