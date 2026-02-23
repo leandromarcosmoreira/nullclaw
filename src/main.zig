@@ -29,6 +29,7 @@ const Command = enum {
     migrate,
     models,
     auth,
+    update,
     help,
 };
 
@@ -51,6 +52,7 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "migrate", .migrate },
         .{ "models", .models },
         .{ "auth", .auth },
+        .{ "update", .update },
         .{ "help", .help },
         .{ "--help", .help },
         .{ "-h", .help },
@@ -99,6 +101,7 @@ pub fn main() !void {
         .migrate => try runMigrate(allocator, sub_args),
         .models => try runModels(allocator, sub_args),
         .auth => try runAuth(allocator, sub_args),
+        .update => try runUpdate(allocator, sub_args),
     }
 }
 
@@ -841,6 +844,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         config.default_provider,
         config.providers,
     ) catch null;
+    defer if (resolved_api_key) |k| allocator.free(k);
 
     // OAuth providers (openai-codex) don't need an API key
     const provider_kind = yc.providers.classifyProvider(config.default_provider);
@@ -920,6 +924,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         }
     else
         null;
+    defer if (mcp_tools) |mt| allocator.free(mt);
 
     // Build security policy from config
     const security = @import("nullclaw").security.policy;
@@ -949,7 +954,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
     }) catch &.{};
-    defer if (tools.len > 0) allocator.free(tools);
+    defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
     if (mcp_tools) |mt| {
         std.debug.print("  MCP tools: {d}\n", .{mt.len});
@@ -964,9 +969,11 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
             mem_opt = mem;
         } else |_| {}
     }
+    defer if (mem_opt) |m| m.deinit();
 
     // Create provider
     var holder = yc.providers.ProviderHolder.fromConfig(allocator, config.default_provider, resolved_api_key, config.getProviderBaseUrl(config.default_provider));
+    defer holder.deinit();
     const provider_i = holder.provider();
 
     // Create noop observer
@@ -1135,6 +1142,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         config.default_provider,
         config.providers,
     ) catch null;
+    defer if (resolved_api_key) |k| allocator.free(k);
 
     // OAuth providers (openai-codex) don't need an API key
     const provider_kind = yc.providers.classifyProvider(config.default_provider);
@@ -1179,6 +1187,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         };
         break :blk wt;
     } else null;
+    defer if (whisper_ptr) |wt| allocator.destroy(wt);
     if (whisper_ptr) |wt| tg.transcriber = wt.transcriber();
 
     // Initialize MCP tools from config
@@ -1189,6 +1198,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         }
     else
         null;
+    defer if (mcp_tools) |mt| allocator.free(mt);
 
     // Build security policy from config
     const security = @import("nullclaw").security.policy;
@@ -1218,7 +1228,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
     }) catch &.{};
-    defer if (tools.len > 0) allocator.free(tools);
+    defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
     if (mcp_tools) |mt| {
         std.debug.print("  MCP tools: {d}\n", .{mt.len});
@@ -1233,6 +1243,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
             mem_opt = mem;
         } else |_| {}
     }
+    defer if (mem_opt) |m| m.deinit();
 
     // Create noop observer
     var noop_obs = yc.observability.NoopObserver{};
@@ -1240,6 +1251,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
 
     // Create provider vtable — concrete struct must stay alive for the loop.
     var holder = yc.providers.ProviderHolder.fromConfig(allocator, config.default_provider, resolved_api_key, config.getProviderBaseUrl(config.default_provider));
+    defer holder.deinit();
     const provider_i: yc.providers.Provider = holder.provider();
 
     std.debug.print("  Tools: {d} loaded\n", .{tools.len});
@@ -1426,6 +1438,30 @@ fn runAuth(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         printAuthUsage();
         std.process.exit(1);
     }
+}
+
+// ── Update ─────────────────────────────────────────────────────────
+
+fn runUpdate(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    var opts = yc.update.Options{ .check_only = false, .yes = false };
+
+    var i: usize = 0;
+    while (i < sub_args.len) : (i += 1) {
+        if (std.mem.eql(u8, sub_args[i], "--check")) {
+            opts.check_only = true;
+        } else if (std.mem.eql(u8, sub_args[i], "--yes")) {
+            opts.yes = true;
+        } else {
+            std.debug.print("Unknown option: {s}\n", .{sub_args[i]});
+            std.debug.print("Usage: nullclaw update [--check] [--yes]\n", .{});
+            std.process.exit(1);
+        }
+    }
+
+    yc.update.run(allocator, opts) catch |err| {
+        std.debug.print("Update failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
 }
 
 fn printAuthUsage() void {
@@ -1691,6 +1727,7 @@ fn printUsage() void {
         \\  migrate     Migrate data from other agent runtimes
         \\  models      Manage provider model catalogs
         \\  auth        Manage OAuth authentication (OpenAI Codex)
+        \\  update      Check for and install updates
         \\  help        Show this help
         \\
         \\OPTIONS:
@@ -1707,6 +1744,7 @@ fn printUsage() void {
         \\  migrate openclaw [--dry-run] [--source PATH]
         \\  models refresh
         \\  auth <login|status|logout> <provider> [--import-codex]
+        \\  update [--check] [--yes]
         \\
     ;
     std.debug.print("{s}", .{usage});
@@ -1722,5 +1760,6 @@ test "parse known commands" {
     try std.testing.expectEqual(.migrate, parseCommand("migrate").?);
     try std.testing.expectEqual(.models, parseCommand("models").?);
     try std.testing.expectEqual(.auth, parseCommand("auth").?);
+    try std.testing.expectEqual(.update, parseCommand("update").?);
     try std.testing.expect(parseCommand("unknown") == null);
 }
