@@ -1028,6 +1028,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
                 const err_msg = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
+                    error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
@@ -1317,6 +1318,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
                 const err_msg = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
+                    error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };

@@ -375,6 +375,7 @@ fn inboundDispatcherThread(
             const err_msg: []const u8 = switch (err) {
                 error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                 error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+                error.NoResponseContent => "Model returned an empty response. Please try again.",
                 error.OutOfMemory => "Out of memory.",
                 else => "An error occurred. Try again.",
             };

@@ -1222,6 +1222,26 @@ pub fn sendTelegramReply(allocator: std.mem.Allocator, bot_token: []const u8, ch
     _ = curl_child.wait() catch {};
 }
 
+fn userFacingAgentError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+        error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+        error.NoResponseContent => "Model returned an empty response. Please try again.",
+        error.OutOfMemory => "Out of memory.",
+        else => "An error occurred. Try again.",
+    };
+}
+
+fn userFacingAgentErrorJson(err: anyerror) []const u8 {
+    return switch (err) {
+        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "{\"error\":\"network error\"}",
+        error.ProviderDoesNotSupportVision => "{\"error\":\"provider does not support image input\"}",
+        error.NoResponseContent => "{\"error\":\"model returned empty response\"}",
+        error.OutOfMemory => "{\"error\":\"out of memory\"}",
+        else => "{\"error\":\"agent failure\"}",
+    };
+}
+
 const WebhookHandlerContext = struct {
     root_allocator: std.mem.Allocator,
     req_allocator: std.mem.Allocator,
@@ -1315,10 +1335,8 @@ fn handleTelegramWebhookRoute(ctx: *WebhookHandlerContext) void {
                 const tg_cfg_opt: ?*const Config = if (ctx.config_opt) |cfg| cfg else null;
                 const sk = telegramSessionKeyRouted(ctx.req_allocator, &kb, chat_id.?, b, tg_cfg_opt, tg_account_id);
                 const reply: ?[]const u8 = sm.processMessage(sk, msg_text.?) catch |err| blk: {
-                    if (err == error.ProviderDoesNotSupportVision) {
-                        if (tg_bot_token.len > 0) {
-                            sendTelegramReply(ctx.req_allocator, tg_bot_token, chat_id.?, "The current provider does not support image input.") catch {};
-                        }
+                    if (tg_bot_token.len > 0) {
+                        sendTelegramReply(ctx.req_allocator, tg_bot_token, chat_id.?, userFacingAgentError(err)) catch {};
                     }
                     break :blk null;
                 };
@@ -1450,9 +1468,7 @@ fn handleWhatsAppWebhookRoute(ctx: *WebhookHandlerContext) void {
                 ctx.response_body = "{\"status\":\"received\"}";
             } else if (ctx.session_mgr_opt) |sm| {
                 const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt) catch |err| blk: {
-                    if (err == error.ProviderDoesNotSupportVision) {
-                        ctx.response_body = "{\"error\":\"provider does not support image input\"}";
-                    }
+                    ctx.response_body = userFacingAgentErrorJson(err);
                     break :blk null;
                 };
                 if (reply) |r| {
@@ -1508,9 +1524,7 @@ fn handleWhatsAppWebhookRoute(ctx: *WebhookHandlerContext) void {
                 ctx.response_body = "{\"status\":\"received\"}";
             } else if (ctx.session_mgr_opt) |sm| {
                 const reply: ?[]const u8 = sm.processMessage(wa_session_key, mt) catch |err| blk: {
-                    if (err == error.ProviderDoesNotSupportVision) {
-                        ctx.response_body = "{\"error\":\"provider does not support image input\"}";
-                    }
+                    ctx.response_body = userFacingAgentErrorJson(err);
                     break :blk null;
                 };
                 if (reply) |r| {
@@ -1705,7 +1719,11 @@ fn handleSlackWebhookRoute(ctx: *WebhookHandlerContext) void {
         ) catch null;
         _ = publishToBus(eb, ctx.state.allocator, "slack", sender_id, channel_id, text, sk, metadata);
     } else if (ctx.session_mgr_opt) |sm| {
-        const reply: ?[]const u8 = sm.processMessage(sk, text) catch null;
+        const reply: ?[]const u8 = sm.processMessage(sk, text) catch |err| blk: {
+            var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
+            outbound_ch.sendMessage(channel_id, userFacingAgentError(err)) catch {};
+            break :blk null;
+        };
         if (reply) |r| {
             defer ctx.root_allocator.free(r);
             var outbound_ch = channels.slack.SlackChannel.initFromConfig(ctx.req_allocator, slack_cfg.*);
@@ -1824,7 +1842,16 @@ fn handleLineWebhookRoute(ctx: *WebhookHandlerContext) void {
                     }) catch null;
                     _ = publishToBus(eb, ctx.state.allocator, "line", uid, line_target, text, sk, meta);
                 } else if (ctx.session_mgr_opt) |sm| {
-                    const reply: ?[]const u8 = sm.processMessage(sk, text) catch null;
+                    const reply: ?[]const u8 = sm.processMessage(sk, text) catch |err| blk: {
+                        if (evt.reply_token) |rt| {
+                            var line_ch = channels.line.LineChannel.init(ctx.req_allocator, .{
+                                .access_token = line_access_token,
+                                .channel_secret = line_channel_secret,
+                            });
+                            line_ch.replyMessage(rt, userFacingAgentError(err)) catch {};
+                        }
+                        break :blk null;
+                    };
                     if (reply) |r| {
                         defer ctx.root_allocator.free(r);
                         if (evt.reply_token) |rt| {
@@ -1930,7 +1957,10 @@ fn handleLarkWebhookRoute(ctx: *WebhookHandlerContext) void {
             }) catch null;
             _ = publishToBus(eb, ctx.state.allocator, "lark", msg.sender, msg.sender, msg.content, sk, meta);
         } else if (ctx.session_mgr_opt) |sm| {
-            const reply: ?[]const u8 = sm.processMessage(sk, msg.content) catch null;
+            const reply: ?[]const u8 = sm.processMessage(sk, msg.content) catch |err| blk: {
+                lark_ch.sendMessage(msg.sender, userFacingAgentError(err)) catch {};
+                break :blk null;
+            };
             if (reply) |r| {
                 defer ctx.root_allocator.free(r);
                 lark_ch.sendMessage(msg.sender, r) catch {};
@@ -2184,9 +2214,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 response_body = "{\"status\":\"received\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 const reply: ?[]const u8 = sm.processMessage(session_key, msg_text) catch |err| blk: {
-                                    if (err == error.ProviderDoesNotSupportVision) {
-                                        response_body = "{\"error\":\"provider does not support image input\"}";
-                                    }
+                                    response_body = userFacingAgentErrorJson(err);
                                     break :blk null;
                                 };
                                 if (reply) |r| {
@@ -3259,6 +3287,41 @@ test "extractBody returns null for no body" {
 test "extractBody returns null for no separator" {
     const raw = "GET /health HTTP/1.1\r\nHost: localhost\r\n";
     try std.testing.expect(extractBody(raw) == null);
+}
+
+test "userFacingAgentError maps ProviderDoesNotSupportVision" {
+    try std.testing.expectEqualStrings(
+        "The current provider does not support image input.",
+        userFacingAgentError(error.ProviderDoesNotSupportVision),
+    );
+}
+
+test "userFacingAgentError maps NoResponseContent" {
+    try std.testing.expectEqualStrings(
+        "Model returned an empty response. Please try again.",
+        userFacingAgentError(error.NoResponseContent),
+    );
+}
+
+test "userFacingAgentError maps generic error fallback" {
+    try std.testing.expectEqualStrings(
+        "An error occurred. Try again.",
+        userFacingAgentError(error.Unexpected),
+    );
+}
+
+test "userFacingAgentErrorJson maps NoResponseContent" {
+    try std.testing.expectEqualStrings(
+        "{\"error\":\"model returned empty response\"}",
+        userFacingAgentErrorJson(error.NoResponseContent),
+    );
+}
+
+test "userFacingAgentErrorJson maps generic error fallback" {
+    try std.testing.expectEqualStrings(
+        "{\"error\":\"agent failure\"}",
+        userFacingAgentErrorJson(error.Unexpected),
+    );
 }
 
 test "GatewayState init has empty telegram_bot_token" {

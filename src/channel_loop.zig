@@ -250,6 +250,7 @@ pub fn runTelegramLoop(
                 const err_msg: []const u8 = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
+                    error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
@@ -371,6 +372,7 @@ pub fn runSignalLoop(
                 const err_msg: []const u8 = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+                    error.NoResponseContent => "Model returned an empty response. Please try again.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again.",
                 };
@@ -566,6 +568,7 @@ pub fn runMatrixLoop(
                 const err_msg: []const u8 = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+                    error.NoResponseContent => "Model returned an empty response. Please try again.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again.",
                 };
