@@ -81,6 +81,14 @@ pub const DiscordChannel = struct {
         return fbs.getWritten();
     }
 
+    /// Build a Discord REST API URL for triggering typing in a channel.
+    pub fn typingUrl(buf: []u8, channel_id: []const u8) ![]const u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const w = fbs.writer();
+        try w.print("https://discord.com/api/v10/channels/{s}/typing", .{channel_id});
+        return fbs.getWritten();
+    }
+
     /// Extract bot user ID from a bot token.
     /// Discord bot tokens are base64(bot_user_id).random.hmac
     pub fn extractBotUserId(token: []const u8) ?[]const u8 {
@@ -193,6 +201,23 @@ pub const DiscordChannel = struct {
         while (it.next()) |chunk| {
             try self.sendChunk(channel_id, chunk);
         }
+    }
+
+    /// Send a Discord typing indicator (best-effort, errors ignored).
+    pub fn sendTypingIndicator(self: *DiscordChannel, channel_id: []const u8) void {
+        if (builtin.is_test) return;
+        if (channel_id.len == 0) return;
+
+        var url_buf: [256]u8 = undefined;
+        const url = typingUrl(&url_buf, channel_id) catch return;
+
+        var auth_buf: [512]u8 = undefined;
+        var auth_fbs = std.io.fixedBufferStream(&auth_buf);
+        auth_fbs.writer().print("Authorization: Bot {s}", .{self.token}) catch return;
+        const auth_header = auth_fbs.getWritten();
+
+        const resp = root.http_util.curlPost(self.allocator, url, "{}", &.{auth_header}) catch return;
+        self.allocator.free(resp);
     }
 
     fn sendChunk(self: *DiscordChannel, channel_id: []const u8, text: []const u8) !void {
@@ -793,6 +818,17 @@ test "discord send url" {
     var buf: [256]u8 = undefined;
     const url = try DiscordChannel.sendUrl(&buf, "123456");
     try std.testing.expectEqualStrings("https://discord.com/api/v10/channels/123456/messages", url);
+}
+
+test "discord typing url" {
+    var buf: [256]u8 = undefined;
+    const url = try DiscordChannel.typingUrl(&buf, "123456");
+    try std.testing.expectEqualStrings("https://discord.com/api/v10/channels/123456/typing", url);
+}
+
+test "discord sendTypingIndicator is no-op in tests" {
+    var ch = DiscordChannel.init(std.testing.allocator, "my-bot-token", null, false);
+    ch.sendTypingIndicator("123456");
 }
 
 test "discord extract bot user id" {

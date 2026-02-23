@@ -18,6 +18,7 @@ const channel_manager = @import("channel_manager.zig");
 const agent_routing = @import("agent_routing.zig");
 const channel_catalog = @import("channel_catalog.zig");
 const channel_adapters = @import("channel_adapters.zig");
+const channels_mod = @import("channels/root.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -344,9 +345,29 @@ fn resolveInboundRouteSessionKey(
     return resolveInboundRouteSessionKeyWithMetadata(allocator, config, msg, parsed_meta.fields);
 }
 
+fn sendInboundProcessingIndicator(
+    registry: *const dispatch.ChannelRegistry,
+    channel_name: []const u8,
+    account_id: ?[]const u8,
+    chat_id: []const u8,
+) void {
+    // Keep behavior explicit and narrow: Discord has a native typing endpoint.
+    if (!std.mem.eql(u8, channel_name, "discord")) return;
+
+    const channel_opt = if (account_id) |aid|
+        registry.findByNameAccount(channel_name, aid)
+    else
+        registry.findByName(channel_name);
+    const ch = channel_opt orelse return;
+
+    const discord_ch: *channels_mod.discord.DiscordChannel = @ptrCast(@alignCast(ch.ptr));
+    discord_ch.sendTypingIndicator(chat_id);
+}
+
 fn inboundDispatcherThread(
     allocator: std.mem.Allocator,
     event_bus: *bus_mod.Bus,
+    registry: *const dispatch.ChannelRegistry,
     runtime: *channel_loop.ChannelRuntime,
     state: *DaemonState,
 ) void {
@@ -367,6 +388,8 @@ fn inboundDispatcherThread(
         );
         defer if (routed_session_key) |key| allocator.free(key);
         const session_key = routed_session_key orelse msg.session_key;
+
+        sendInboundProcessingIndicator(registry, msg.channel, outbound_account_id, msg.chat_id);
 
         const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
             log.warn("inbound dispatch process failed: {}", .{err});
@@ -529,7 +552,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     if (channel_rt) |rt| {
         state.addComponent("inbound_dispatcher");
         if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, inboundDispatcherThread, .{
-            allocator, &event_bus, rt, &state,
+            allocator, &event_bus, &channel_registry, rt, &state,
         })) |thread| {
             inbound_thread = thread;
             state.markRunning("inbound_dispatcher");
