@@ -36,6 +36,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
 const config_types = @import("../config_types.zig");
+const sse_client = @import("../sse_client.zig");
 
 const log = std.log.scoped(.signal);
 
@@ -89,8 +90,8 @@ pub const RecipientTarget = union(enum) {
 /// Signal channel — uses signal-cli daemon's native JSON-RPC + SSE API.
 ///
 /// Sends messages via JSON-RPC POST to `/api/v1/rpc`.
-/// The SSE listener (for incoming messages) would be driven by the
-/// dispatch loop calling `pollMessages()`.
+/// The SSE listener (for incoming messages) uses streaming HTTP for
+/// real-time message delivery.
 pub const SignalChannel = struct {
     allocator: std.mem.Allocator,
     account_id: []const u8 = "default",
@@ -110,6 +111,11 @@ pub const SignalChannel = struct {
     ignore_attachments: bool,
     /// Skip story messages.
     ignore_stories: bool,
+    /// Persistent SSE connection for streaming message delivery.
+    /// Initialized on first poll, maintained across polls for real-time delivery.
+    sse_conn: ?sse_client.SseConnection = null,
+    /// Buffer for accumulating SSE data between reads.
+    sse_buffer: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -162,6 +168,16 @@ pub const SignalChannel = struct {
         return fbs.getWritten();
     }
 
+    /// Build the SSE events URL base (without account query param).
+    /// Used by SSE client which adds the account param.
+    pub fn sseBaseUrl(self: *const SignalChannel, buf: []u8) ![]const u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const w = fbs.writer();
+        try w.writeAll(self.http_url);
+        try w.writeAll(SIGNAL_SSE_ENDPOINT);
+        return fbs.getWritten();
+    }
+
     /// Build the SSE events URL (with account query param).
     pub fn sseUrl(self: *const SignalChannel, buf: []u8) ![]const u8 {
         var fbs = std.io.fixedBufferStream(buf);
@@ -169,7 +185,6 @@ pub const SignalChannel = struct {
         try w.writeAll(self.http_url);
         try w.writeAll(SIGNAL_SSE_ENDPOINT);
         try w.writeAll("?account=");
-        // URL-encode the account (mainly the '+' character)
         for (self.account) |c| {
             if (c == '+') {
                 try w.writeAll("%2B");
@@ -589,29 +604,58 @@ pub const SignalChannel = struct {
     }
 
     /// Poll for messages using SSE (Server-Sent Events).
-    /// This is a long-poll that waits for incoming messages from signal-cli.
+    /// Uses persistent streaming HTTP connection for real-time delivery.
     /// Returns a slice of ChannelMessages allocated on the given allocator.
     pub fn pollMessages(self: *SignalChannel, allocator: std.mem.Allocator) ![]root.ChannelMessage {
         if (builtin.is_test) return &.{};
 
-        var url_buf: [1024]u8 = undefined;
-        const url = try self.sseUrl(&url_buf);
+        // Initialize SSE connection on first poll
+        if (self.sse_conn == null) {
+            var url_buf: [1024]u8 = undefined;
+            const url = try self.sseBaseUrl(&url_buf);
 
-        // Use curl with SSE flags (-N for no-buffer, Accept header)
-        // Use 10 second timeout - SSE returns when data arrives or timeout
-        const resp = root.http_util.curlGetSSE(allocator, url, "10") catch |err| {
-            log.warn("Signal SSE poll failed: {}", .{err});
-            return err;
+            self.sse_conn = sse_client.SseConnection.init(self.allocator, url);
+
+            // Connect with retry logic
+            var retry_delay: u64 = 2;
+            const max_retry_delay: u64 = 60;
+
+            while (true) {
+                const status = self.sse_conn.?.connect() catch |err| {
+                    log.warn("SSE connect failed: {}, retrying in {}s...", .{ err, retry_delay });
+                    std.Thread.sleep(retry_delay * std.time.ns_per_s);
+                    retry_delay = @min(retry_delay * 2, max_retry_delay);
+                    continue;
+                };
+
+                log.info("Signal SSE connected (status: {d})", .{status});
+                break;
+            }
+        }
+
+        // Read from the streaming connection
+        var read_buf: [8192]u8 = undefined;
+        const bytes_read = self.sse_conn.?.read(&read_buf) catch |err| {
+            // Connection lost or read error, reset and return empty to trigger reconnect
+            log.warn("SSE read error: {}, reconnecting...", .{err});
+            if (self.sse_conn) |*conn| {
+                conn.deinit();
+                self.sse_conn = null;
+            }
+            self.sse_buffer.clearRetainingCapacity();
+            return &.{};
         };
-        defer allocator.free(resp);
 
-        if (resp.len == 0) {
+        if (bytes_read == 0) {
+            // No data available right now - this is normal for streaming SSE
+            // Don't close the connection, just return empty and poll again later
             return &.{};
         }
 
-        log.debug("SSE response: {s}", .{resp[0..@min(500, resp.len)]});
+        // Append new data to buffer
+        try self.sse_buffer.appendSlice(allocator, read_buf[0..bytes_read]);
 
-        // Parse SSE response - each line is "data: {json}\n\n"
+        // Parse SSE events from buffer
         var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
         errdefer {
             for (messages.items) |*msg| {
@@ -620,36 +664,58 @@ pub const SignalChannel = struct {
             messages.deinit(allocator);
         }
 
-        var data_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer data_buf.deinit(allocator);
-
-        var lines = std.mem.splitScalar(u8, resp, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \r");
-            if (trimmed.len == 0) {
-                // End of event — process accumulated data
-                if (data_buf.items.len > 0) {
-                    if (self.parseSSEEnvelope(data_buf.items)) |msg_opt| {
-                        if (msg_opt) |msg| try messages.append(allocator, msg);
-                    } else |_| {}
-                    data_buf.clearRetainingCapacity();
+        // Parse SSE format: events separated by double newlines
+        var event_start: usize = 0;
+        while (event_start < self.sse_buffer.items.len) {
+            // Find end of event (double newline)
+            const event_end = blk: {
+                var i = event_start;
+                while (i + 1 < self.sse_buffer.items.len) : (i += 1) {
+                    if (self.sse_buffer.items[i] == '\n' and self.sse_buffer.items[i + 1] == '\n') {
+                        break :blk i;
+                    }
                 }
-                continue;
+                break :blk null;
+            };
+
+            if (event_end == null) break; // Incomplete event, wait for more data
+
+            const event_data = self.sse_buffer.items[event_start..event_end.?];
+
+            // Parse lines within event looking for "data: " prefix
+            var json_data: ?[]const u8 = null;
+            var lines = std.mem.splitScalar(u8, event_data, '\n');
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \r");
+                if (std.mem.startsWith(u8, trimmed, "data:")) {
+                    json_data = std.mem.trim(u8, trimmed[5..], " ");
+                    break;
+                }
             }
-            if (trimmed[0] == ':') continue;
-            if (std.mem.startsWith(u8, trimmed, "event:")) continue;
-            if (std.mem.startsWith(u8, trimmed, ENVELOPE_PREFIX)) {
-                const json_start = trimmed[ENVELOPE_PREFIX.len..];
-                const json_trimmed = std.mem.trim(u8, json_start, " \r");
-                if (data_buf.items.len > 0) try data_buf.appendSlice(allocator, "\n");
-                try data_buf.appendSlice(allocator, json_trimmed);
+
+            if (json_data) |json| {
+                if (self.parseSSEEnvelope(json)) |msg_opt| {
+                    if (msg_opt) |msg| {
+                        log.debug("Received message from {s} on signal ({d} chars) timestamp={d}", .{ msg.sender, msg.content.len, msg.timestamp });
+                        try messages.append(allocator, msg);
+                    }
+                } else |_| {}
             }
+
+            // Move past this event (skip the double newline)
+            event_start = event_end.? + 2;
         }
-        // Handle final event if no trailing blank line
-        if (data_buf.items.len > 0) {
-            if (self.parseSSEEnvelope(data_buf.items)) |msg_opt| {
-                if (msg_opt) |msg| try messages.append(allocator, msg);
-            } else |_| {}
+
+        // Remove processed data from buffer
+        if (event_start > 0) {
+            const remaining = self.sse_buffer.items[event_start..];
+            std.mem.copyForwards(u8, self.sse_buffer.items[0..remaining.len], remaining);
+            self.sse_buffer.items.len = remaining.len;
+        }
+
+        // Clean up if no messages and buffer is getting large
+        if (messages.items.len == 0 and self.sse_buffer.items.len > 65536) {
+            self.sse_buffer.clearRetainingCapacity();
         }
 
         return try messages.toOwnedSlice(allocator);
@@ -672,8 +738,14 @@ pub const SignalChannel = struct {
     }
 
     fn vtableStop(ptr: *anyopaque) void {
-        _ = ptr;
-        // Nothing to clean up for HTTP-based channel.
+        const self: *SignalChannel = @ptrCast(@alignCast(ptr));
+        // Clean up SSE connection
+        if (self.sse_conn) |*conn| {
+            conn.deinit();
+            self.sse_conn = null;
+        }
+        // Clean up SSE buffer
+        self.sse_buffer.deinit(self.allocator);
     }
 
     fn vtableSend(ptr: *anyopaque, target: []const u8, message: []const u8, _: []const []const u8) anyerror!void {
