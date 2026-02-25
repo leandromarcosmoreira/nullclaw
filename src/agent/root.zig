@@ -18,6 +18,7 @@ const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
 const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
+const capabilities_mod = @import("../capabilities.zig");
 const multimodal = @import("../multimodal.zig");
 const platform = @import("../platform.zig");
 const observability = @import("../observability.zig");
@@ -28,6 +29,8 @@ const SecurityPolicy = @import("../security/policy.zig").SecurityPolicy;
 const cache = memory_mod.cache;
 pub const dispatcher = @import("dispatcher.zig");
 pub const compaction = @import("compaction.zig");
+pub const context_tokens = @import("context_tokens.zig");
+pub const max_tokens_resolver = @import("max_tokens.zig");
 pub const prompt = @import("prompt.zig");
 pub const memory_loader = @import("memory_loader.zig");
 pub const commands = @import("commands.zig");
@@ -232,7 +235,9 @@ pub const Agent = struct {
     max_history_messages: u32,
     auto_save: bool,
     token_limit: u64 = 0,
-    max_tokens: ?u32 = null,
+    token_limit_override: ?u64 = null,
+    max_tokens: u32 = max_tokens_resolver.DEFAULT_MODEL_MAX_TOKENS,
+    max_tokens_override: ?u32 = null,
     reasoning_effort: ?[]const u8 = null,
     verbose_level: VerboseLevel = .off,
     reasoning_mode: ReasoningMode = .off,
@@ -315,6 +320,11 @@ pub const Agent = struct {
         observer_i: Observer,
     ) !Agent {
         const default_model = cfg.default_model orelse return error.NoDefaultModel;
+        const token_limit_override = if (cfg.agent.token_limit_explicit) cfg.agent.token_limit else null;
+        const resolved_token_limit = context_tokens.resolveContextTokens(token_limit_override, default_model);
+        const resolved_max_tokens_raw = max_tokens_resolver.resolveMaxTokens(cfg.max_tokens, default_model);
+        const token_limit_cap: u32 = @intCast(@min(resolved_token_limit, @as(u64, std.math.maxInt(u32))));
+        const resolved_max_tokens = @min(resolved_max_tokens_raw, token_limit_cap);
 
         // Build tool specs for function-calling APIs
         const specs = try allocator.alloc(ToolSpec, tools.len);
@@ -344,8 +354,10 @@ pub const Agent = struct {
             .max_tool_iterations = cfg.agent.max_tool_iterations,
             .max_history_messages = cfg.agent.max_history_messages,
             .auto_save = cfg.memory.auto_save,
-            .token_limit = cfg.agent.token_limit,
-            .max_tokens = cfg.max_tokens,
+            .token_limit = resolved_token_limit,
+            .token_limit_override = token_limit_override,
+            .max_tokens = resolved_max_tokens,
+            .max_tokens_override = cfg.max_tokens,
             .reasoning_effort = cfg.reasoning_effort,
             .message_timeout_secs = cfg.agent.message_timeout_secs,
             .compaction_keep_recent = cfg.agent.compaction_keep_recent,
@@ -559,10 +571,22 @@ pub const Agent = struct {
 
         // Inject system prompt on first turn
         if (!self.has_system_prompt) {
+            var cfg_for_caps_opt: ?Config = Config.load(self.allocator) catch null;
+            defer if (cfg_for_caps_opt) |*cfg_loaded| cfg_loaded.deinit();
+            const cfg_for_caps_ptr: ?*const Config = if (cfg_for_caps_opt) |*cfg_loaded| cfg_loaded else null;
+
+            const capabilities_section = capabilities_mod.buildPromptSection(
+                self.allocator,
+                cfg_for_caps_ptr,
+                self.tools,
+            ) catch null;
+            defer if (capabilities_section) |section| self.allocator.free(section);
+
             const system_prompt = try prompt.buildSystemPrompt(self.allocator, .{
                 .workspace_dir = self.workspace_dir,
                 .model_name = self.model_name,
                 .tools = self.tools,
+                .capabilities_section = capabilities_section,
             });
             defer self.allocator.free(system_prompt);
 
@@ -574,10 +598,25 @@ pub const Agent = struct {
             @memcpy(full_system[0..system_prompt.len], system_prompt);
             @memcpy(full_system[system_prompt.len..], tool_instructions);
 
-            try self.history.append(self.allocator, .{
-                .role = .system,
-                .content = full_system,
-            });
+            // Keep exactly one canonical system prompt at history[0].
+            // This allows /model to invalidate and refresh the prompt in place.
+            if (self.history.items.len > 0 and self.history.items[0].role == .system) {
+                self.history.items[0].deinit(self.allocator);
+                self.history.items[0] = .{
+                    .role = .system,
+                    .content = full_system,
+                };
+            } else if (self.history.items.len > 0) {
+                try self.history.insert(self.allocator, 0, .{
+                    .role = .system,
+                    .content = full_system,
+                });
+            } else {
+                try self.history.append(self.allocator, .{
+                    .role = .system,
+                    .content = full_system,
+                });
+            }
             self.has_system_prompt = true;
         }
 
@@ -986,7 +1025,7 @@ pub const Agent = struct {
             const scrubbed_results = try providers.scrubToolOutput(arena, formatted_results);
             const with_reflection = try std.fmt.allocPrint(
                 arena,
-                "{s}\n\nReflect on the tool results above and decide your next steps.",
+                "{s}\n\nReflect on the tool results above and decide your next steps. If a tool failed due to policy/permissions, do not repeat the same blocked call; explain the limitation and choose a different available tool or ask the user for permission/config change.",
                 .{scrubbed_results},
             );
             try self.history.append(self.allocator, .{
@@ -1882,6 +1921,102 @@ fn find_tool_by_name(tools: []const Tool, name: []const u8) ?Tool {
     return null;
 }
 
+test "Agent.fromConfig resolves token limit from model lookup when unset" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "openai/gpt-4.1-mini",
+        .allocator = allocator,
+    };
+    cfg.agent.token_limit = config_types.DEFAULT_AGENT_TOKEN_LIMIT;
+    cfg.agent.token_limit_explicit = false;
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());
+    defer agent.deinit();
+
+    try std.testing.expectEqual(@as(u64, 128_000), agent.token_limit);
+    try std.testing.expect(agent.token_limit_override == null);
+    try std.testing.expectEqual(@as(u32, max_tokens_resolver.DEFAULT_MODEL_MAX_TOKENS), agent.max_tokens);
+    try std.testing.expect(agent.max_tokens_override == null);
+}
+
+test "Agent.fromConfig keeps explicit token_limit override" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "openai/gpt-4.1-mini",
+        .allocator = allocator,
+    };
+    cfg.agent.token_limit = 64_000;
+    cfg.agent.token_limit_explicit = true;
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());
+    defer agent.deinit();
+
+    try std.testing.expectEqual(@as(u64, 64_000), agent.token_limit);
+    try std.testing.expectEqual(@as(?u64, 64_000), agent.token_limit_override);
+}
+
+test "Agent.fromConfig resolves max_tokens from provider lookup when unset" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "qianfan/custom-model",
+        .allocator = allocator,
+    };
+    cfg.max_tokens = null;
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());
+    defer agent.deinit();
+
+    try std.testing.expectEqual(@as(u32, 32_768), agent.max_tokens);
+    try std.testing.expect(agent.max_tokens_override == null);
+}
+
+test "Agent.fromConfig keeps explicit max_tokens override" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "qianfan/custom-model",
+        .allocator = allocator,
+    };
+    cfg.max_tokens = 1536;
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());
+    defer agent.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1536), agent.max_tokens);
+    try std.testing.expectEqual(@as(?u32, 1536), agent.max_tokens_override);
+}
+
+test "Agent.fromConfig clamps max_tokens to token_limit" {
+    const allocator = std.testing.allocator;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "openai/gpt-4.1-mini",
+        .allocator = allocator,
+    };
+    cfg.agent.token_limit = 4096;
+    cfg.agent.token_limit_explicit = true;
+    cfg.max_tokens = 8192;
+
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfig(allocator, &cfg, undefined, &.{}, null, noop.observer());
+    defer agent.deinit();
+
+    try std.testing.expectEqual(@as(u64, 4096), agent.token_limit);
+    try std.testing.expectEqual(@as(u32, 4096), agent.max_tokens);
+}
+
 test "slash /new clears history" {
     const allocator = std.testing.allocator;
     var agent = try makeTestAgent(allocator);
@@ -1981,24 +2116,63 @@ test "slash /model switches model" {
     const allocator = std.testing.allocator;
     var agent = try makeTestAgent(allocator);
     defer agent.deinit();
+    agent.max_tokens = 111;
+    agent.has_system_prompt = true;
 
     const response = (try agent.handleSlashCommand("/model gpt-4o")).?;
     defer allocator.free(response);
 
     try std.testing.expect(std.mem.indexOf(u8, response, "gpt-4o") != null);
     try std.testing.expectEqualStrings("gpt-4o", agent.model_name);
+    try std.testing.expectEqual(@as(u64, 128_000), agent.token_limit);
+    try std.testing.expectEqual(@as(u32, 8192), agent.max_tokens);
+    try std.testing.expect(!agent.has_system_prompt);
 }
 
 test "slash /model with colon switches model" {
     const allocator = std.testing.allocator;
     var agent = try makeTestAgent(allocator);
     defer agent.deinit();
+    agent.max_tokens = 111;
 
     const response = (try agent.handleSlashCommand("/model: gpt-4.1-mini")).?;
     defer allocator.free(response);
 
     try std.testing.expect(std.mem.indexOf(u8, response, "gpt-4.1-mini") != null);
     try std.testing.expectEqualStrings("gpt-4.1-mini", agent.model_name);
+    try std.testing.expectEqual(@as(u64, 128_000), agent.token_limit);
+    try std.testing.expectEqual(@as(u32, 8192), agent.max_tokens);
+}
+
+test "slash /model resolves provider max_tokens fallback" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    agent.max_tokens = 111;
+
+    const response = (try agent.handleSlashCommand("/model qianfan/custom-model")).?;
+    defer allocator.free(response);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "qianfan/custom-model") != null);
+    try std.testing.expectEqualStrings("qianfan/custom-model", agent.model_name);
+    try std.testing.expectEqual(@as(u32, 32_768), agent.max_tokens);
+}
+
+test "slash /model keeps explicit token_limit override" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    agent.token_limit_override = 64_000;
+    agent.token_limit = 64_000;
+    agent.max_tokens_override = 1024;
+    agent.max_tokens = 1024;
+
+    const response = (try agent.handleSlashCommand("/model claude-opus-4-6")).?;
+    defer allocator.free(response);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "claude-opus-4-6") != null);
+    try std.testing.expectEqual(@as(u64, 64_000), agent.token_limit);
+    try std.testing.expectEqual(@as(u32, 1024), agent.max_tokens);
 }
 
 test "slash /model without name shows current" {

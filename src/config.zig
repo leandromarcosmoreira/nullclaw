@@ -245,7 +245,33 @@ pub const Config = struct {
         }
     }
 
-    fn writeChannelAccounts(w: *std.Io.Writer, channel_name: []const u8, accounts: anytype) !void {
+    fn writeIndentedMultilineJson(w: *std.Io.Writer, json: []const u8, continuation_indent: []const u8) !void {
+        var start: usize = 0;
+        while (start < json.len) {
+            const rel_nl = std.mem.indexOfScalar(u8, json[start..], '\n');
+            if (rel_nl) |nl| {
+                const end = start + nl;
+                try w.writeAll(json[start..end]);
+                try w.writeAll("\n");
+                const next_start = end + 1;
+                if (next_start < json.len) {
+                    try w.writeAll(continuation_indent);
+                }
+                start = next_start;
+            } else {
+                try w.writeAll(json[start..]);
+                break;
+            }
+        }
+    }
+
+    fn writePrettyJsonInline(allocator: std.mem.Allocator, w: *std.Io.Writer, value: anytype, continuation_indent: []const u8) !void {
+        const pretty = try std.json.Stringify.valueAlloc(allocator, value, .{ .whitespace = .indent_2 });
+        defer allocator.free(pretty);
+        try writeIndentedMultilineJson(w, pretty, continuation_indent);
+    }
+
+    fn writeChannelAccounts(allocator: std.mem.Allocator, w: *std.Io.Writer, channel_name: []const u8, accounts: anytype) !void {
         try w.print("    \"{s}\": {{\n      \"accounts\": {{", .{channel_name});
         for (accounts, 0..) |account, i| {
             if (i == 0) {
@@ -257,7 +283,8 @@ pub const Config = struct {
                 account.account_id
             else
                 "default";
-            try w.print("        \"{s}\": {f}", .{ account_id, std.json.fmt(account, .{}) });
+            try w.print("        \"{s}\": ", .{account_id});
+            try writePrettyJsonInline(allocator, w, account, "        ");
         }
         try w.print("\n      }}\n    }}", .{});
     }
@@ -280,14 +307,15 @@ pub const Config = struct {
                 .pointer => |ptr| {
                     if (ptr.size == .slice and channel_value.len > 0) {
                         try writeChannelFieldSeparator(w, wrote_any);
-                        try writeChannelAccounts(w, field.name, channel_value);
+                        try writeChannelAccounts(self.allocator, w, field.name, channel_value);
                         wrote_any = true;
                     }
                 },
                 .optional => {
                     if (channel_value) |val| {
                         try writeChannelFieldSeparator(w, wrote_any);
-                        try w.print("    \"{s}\": {f}", .{ field.name, std.json.fmt(val, .{}) });
+                        try w.print("    \"{s}\": ", .{field.name});
+                        try writePrettyJsonInline(self.allocator, w, val, "    ");
                         wrote_any = true;
                     }
                 },
@@ -992,8 +1020,9 @@ test "save writes configured telegram channel account" {
 
     try std.testing.expect(std.mem.indexOf(u8, content, "\"telegram\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"accounts\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"main\": {\"account_id\":\"main\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"bot_token\":\"123:ABC\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"main\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"account_id\": \"main\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"bot_token\": \"123:ABC\"") != null);
 }
 
 test "save roundtrip preserves reliability settings" {
@@ -1509,7 +1538,7 @@ test "json parse scheduler section" {
 test "json parse agent section" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml"}}
+        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "token_limit": 64000}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -1518,7 +1547,20 @@ test "json parse agent section" {
     try std.testing.expectEqual(@as(u32, 80), cfg.agent.max_history_messages);
     try std.testing.expect(cfg.agent.parallel_tools);
     try std.testing.expectEqualStrings("xml", cfg.agent.tool_dispatcher);
+    try std.testing.expectEqual(@as(u64, 64_000), cfg.agent.token_limit);
+    try std.testing.expect(cfg.agent.token_limit_explicit);
     allocator.free(cfg.agent.tool_dispatcher);
+}
+
+test "json parse agent token_limit explicit remains false when omitted" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"agent": {"max_tool_iterations": 20}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(config_types.DEFAULT_AGENT_TOKEN_LIMIT, cfg.agent.token_limit);
+    try std.testing.expect(!cfg.agent.token_limit_explicit);
 }
 
 test "json parse composio section" {

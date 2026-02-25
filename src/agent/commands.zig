@@ -1,10 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const providers = @import("../providers/root.zig");
 const Tool = @import("../tools/root.zig").Tool;
 const skills_mod = @import("../skills.zig");
 const spawn_tool_mod = @import("../tools/spawn.zig");
 const subagent_mod = @import("../subagent.zig");
 const memory_mod = @import("../memory/root.zig");
+const config_module = @import("../config.zig");
+const capabilities_mod = @import("../capabilities.zig");
+const config_mutator = @import("../config_mutator.zig");
+const context_tokens = @import("context_tokens.zig");
+const max_tokens_resolver = @import("max_tokens.zig");
 
 const SlashCommand = struct {
     name: []const u8,
@@ -58,6 +64,69 @@ fn setModelName(self: anytype, model: []const u8) !void {
     if (self.model_name_owned) self.allocator.free(self.model_name);
     self.model_name = try self.allocator.dupe(u8, model);
     self.model_name_owned = true;
+
+    if (@hasField(@TypeOf(self.*), "token_limit")) {
+        const token_limit_override: ?u64 = if (@hasField(@TypeOf(self.*), "token_limit_override"))
+            self.token_limit_override
+        else
+            null;
+        self.token_limit = context_tokens.resolveContextTokens(token_limit_override, self.model_name);
+    }
+
+    if (@hasField(@TypeOf(self.*), "max_tokens")) {
+        const max_tokens_override: ?u32 = if (@hasField(@TypeOf(self.*), "max_tokens_override"))
+            self.max_tokens_override
+        else
+            null;
+        var resolved_max_tokens = max_tokens_resolver.resolveMaxTokens(max_tokens_override, self.model_name);
+        if (@hasField(@TypeOf(self.*), "token_limit")) {
+            const token_limit_cap: u32 = @intCast(@min(self.token_limit, @as(u64, std.math.maxInt(u32))));
+            resolved_max_tokens = @min(resolved_max_tokens, token_limit_cap);
+        }
+        self.max_tokens = resolved_max_tokens;
+    }
+}
+
+fn hasProviderModelPrefix(model: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, model, '/') orelse return false;
+    return slash > 0 and slash + 1 < model.len;
+}
+
+fn configPrimaryModelForSelection(self: anytype, model: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, model, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidPath;
+
+    if (hasProviderModelPrefix(trimmed)) {
+        return try self.allocator.dupe(u8, trimmed);
+    }
+
+    const provider = if (@hasField(@TypeOf(self.*), "default_provider") and self.default_provider.len > 0)
+        self.default_provider
+    else
+        "openrouter";
+    return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ provider, trimmed });
+}
+
+fn persistSelectedModelToConfig(self: anytype, model: []const u8) !void {
+    if (builtin.is_test) return;
+
+    const primary = try configPrimaryModelForSelection(self, model);
+    defer self.allocator.free(primary);
+
+    var result = try config_mutator.mutateDefaultConfig(
+        self.allocator,
+        .set,
+        "agents.defaults.model.primary",
+        primary,
+        .{ .apply = true },
+    );
+    defer config_mutator.freeMutationResult(self.allocator, &result);
+}
+
+fn invalidateSystemPromptCache(self: anytype) void {
+    if (@hasField(@TypeOf(self.*), "has_system_prompt")) {
+        self.has_system_prompt = false;
+    }
 }
 
 fn setExecNodeId(self: anytype, value: ?[]const u8) !void {
@@ -1261,6 +1330,166 @@ fn handleStopCommand(self: anytype) ![]const u8 {
     return try self.allocator.dupe(u8, "No active background task to stop.");
 }
 
+fn parseJsonStringOwned(allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .string) return null;
+    return try allocator.dupe(u8, parsed.value.string);
+}
+
+fn parseJsonF64(raw: []const u8) ?f64 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), raw, .{}) catch return null;
+    return switch (parsed.value) {
+        .float => |v| v,
+        .integer => |v| @floatFromInt(v),
+        else => null,
+    };
+}
+
+fn parseJsonU32(raw: []const u8) ?u32 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), raw, .{}) catch return null;
+    return switch (parsed.value) {
+        .integer => |v| blk: {
+            if (v < 0 or v > std.math.maxInt(u32)) break :blk null;
+            break :blk @intCast(v);
+        },
+        else => null,
+    };
+}
+
+fn parseJsonU64(raw: []const u8) ?u64 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), raw, .{}) catch return null;
+    return switch (parsed.value) {
+        .integer => |v| blk: {
+            if (v < 0 or v > std.math.maxInt(u64)) break :blk null;
+            break :blk @intCast(v);
+        },
+        else => null,
+    };
+}
+
+fn hotApplyConfigChange(
+    self: anytype,
+    action: config_mutator.MutationAction,
+    path: []const u8,
+    new_value_json: []const u8,
+) !bool {
+    if (action == .unset) return false;
+
+    if (std.mem.eql(u8, path, "agents.defaults.model.primary")) {
+        const model = try parseJsonStringOwned(self.allocator, new_value_json) orelse return false;
+        defer self.allocator.free(model);
+        try setModelName(self, model);
+        if (@hasField(@TypeOf(self.*), "default_model")) {
+            self.default_model = self.model_name;
+        }
+        return true;
+    }
+
+    if (std.mem.eql(u8, path, "default_temperature")) {
+        const temp = parseJsonF64(new_value_json) orelse return false;
+        if (@hasField(@TypeOf(self.*), "temperature")) {
+            self.temperature = temp;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, path, "agent.max_tool_iterations")) {
+        const v = parseJsonU32(new_value_json) orelse return false;
+        if (@hasField(@TypeOf(self.*), "max_tool_iterations")) {
+            self.max_tool_iterations = v;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, path, "agent.max_history_messages")) {
+        const v = parseJsonU32(new_value_json) orelse return false;
+        if (@hasField(@TypeOf(self.*), "max_history_messages")) {
+            self.max_history_messages = v;
+            return true;
+        }
+        return false;
+    }
+
+    if (std.mem.eql(u8, path, "agent.message_timeout_secs")) {
+        const v = parseJsonU64(new_value_json) orelse return false;
+        if (@hasField(@TypeOf(self.*), "message_timeout_secs")) {
+            self.message_timeout_secs = v;
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+fn formatConfigMutationResponse(
+    allocator: std.mem.Allocator,
+    action: config_mutator.MutationAction,
+    result: *const config_mutator.MutationResult,
+    dry_run: bool,
+    hot_applied: bool,
+) ![]const u8 {
+    const action_name = switch (action) {
+        .set => "set",
+        .unset => "unset",
+    };
+    const mode = if (dry_run) "preview" else "applied";
+    const restart_text = if (result.requires_restart) "true" else "false";
+    const hot_text = if (hot_applied) "true" else "false";
+    const backup = result.backup_path orelse "(none)";
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "Config {s} ({s}):\\n" ++
+            "  action: {s}\\n" ++
+            "  path: {s}\\n" ++
+            "  old: {s}\\n" ++
+            "  new: {s}\\n" ++
+            "  requires_restart: {s}\\n" ++
+            "  hot_applied: {s}\\n" ++
+            "  backup: {s}\\n",
+        .{
+            action_name,
+            mode,
+            action_name,
+            result.path,
+            result.old_value_json,
+            result.new_value_json,
+            restart_text,
+            hot_text,
+            backup,
+        },
+    );
+}
+
+fn handleCapabilitiesCommand(self: anytype, arg: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, arg, " \t");
+    const as_json = std.mem.eql(u8, trimmed, "--json") or std.ascii.eqlIgnoreCase(trimmed, "json");
+
+    var cfg_opt: ?config_module.Config = config_module.Config.load(self.allocator) catch null;
+    defer if (cfg_opt) |*cfg| cfg.deinit();
+    const cfg_ptr: ?*const config_module.Config = if (cfg_opt) |*cfg| cfg else null;
+
+    const runtime_tools: ?[]const Tool = if (@hasField(@TypeOf(self.*), "tools"))
+        self.tools
+    else
+        null;
+
+    if (as_json) {
+        return capabilities_mod.buildManifestJson(self.allocator, cfg_ptr, runtime_tools);
+    }
+    return capabilities_mod.buildSummaryText(self.allocator, cfg_ptr, runtime_tools);
+}
+
 fn handleConfigCommand(self: anytype, arg: []const u8) ![]const u8 {
     const parsed = splitFirstToken(arg);
     const action = parsed.head;
@@ -1286,31 +1515,105 @@ fn handleConfigCommand(self: anytype, arg: []const u8) ![]const u8 {
     if (std.ascii.eqlIgnoreCase(action, "get")) {
         const key = std.mem.trim(u8, parsed.tail, " \t");
         if (key.len == 0) return try self.allocator.dupe(u8, "Usage: /config get <path>");
+        return config_mutator.getPathValueJson(self.allocator, key) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Config get failed: {s}", .{@errorName(err)});
+        };
+    }
 
-        if (std.ascii.eqlIgnoreCase(key, "model")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.model_name});
-        if (std.ascii.eqlIgnoreCase(key, "workspace")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.workspace_dir});
-        if (std.ascii.eqlIgnoreCase(key, "exec.host")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.exec_host.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "exec.security")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.exec_security.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "exec.ask")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.exec_ask.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "queue.mode")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.queue_mode.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "tts.mode")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.tts_mode.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "activation")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.activation_mode.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "send")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.send_mode.toSlice()});
-        if (std.ascii.eqlIgnoreCase(key, "focus")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.focus_target orelse "off"});
-        if (std.ascii.eqlIgnoreCase(key, "dock")) return try std.fmt.allocPrint(self.allocator, "{s}", .{self.dock_target orelse "off"});
-        if (std.ascii.eqlIgnoreCase(key, "session.ttl")) {
-            if (self.session_ttl_secs) |ttl| return try std.fmt.allocPrint(self.allocator, "{d}", .{ttl});
-            return try self.allocator.dupe(u8, "off");
+    if (std.ascii.eqlIgnoreCase(action, "validate")) {
+        config_mutator.validateCurrentConfig(self.allocator) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Config validation failed: {s}", .{@errorName(err)});
+        };
+        return try self.allocator.dupe(u8, "Config validation: OK");
+    }
+
+    if (std.ascii.eqlIgnoreCase(action, "set")) {
+        const path_and_value = splitFirstToken(parsed.tail);
+        const path = path_and_value.head;
+        const value_raw = std.mem.trim(u8, path_and_value.tail, " \t");
+        if (path.len == 0 or value_raw.len == 0) {
+            return try self.allocator.dupe(u8, "Usage: /config set <path> <value> (dry-run preview)");
         }
 
-        return try std.fmt.allocPrint(self.allocator, "Unknown config path: {s}", .{key});
+        var result = config_mutator.mutateDefaultConfig(self.allocator, .set, path, value_raw, .{ .apply = false }) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Config set preview failed: {s}", .{@errorName(err)});
+        };
+        defer config_mutator.freeMutationResult(self.allocator, &result);
+
+        const response = try formatConfigMutationResponse(self.allocator, .set, &result, true, false);
+        return response;
     }
 
-    if (std.ascii.eqlIgnoreCase(action, "set") or std.ascii.eqlIgnoreCase(action, "unset")) {
-        return try self.allocator.dupe(u8, "Config writes are not available from chat in this runtime. Use dedicated slash commands or edit config.json.");
+    if (std.ascii.eqlIgnoreCase(action, "unset")) {
+        const path = std.mem.trim(u8, parsed.tail, " \t");
+        if (path.len == 0) {
+            return try self.allocator.dupe(u8, "Usage: /config unset <path> (dry-run preview)");
+        }
+
+        var result = config_mutator.mutateDefaultConfig(self.allocator, .unset, path, null, .{ .apply = false }) catch |err| {
+            return try std.fmt.allocPrint(self.allocator, "Config unset preview failed: {s}", .{@errorName(err)});
+        };
+        defer config_mutator.freeMutationResult(self.allocator, &result);
+
+        const response = try formatConfigMutationResponse(self.allocator, .unset, &result, true, false);
+        return response;
     }
 
-    return try self.allocator.dupe(u8, "Usage: /config [show] | /config get <path>");
+    if (std.ascii.eqlIgnoreCase(action, "apply")) {
+        const apply_parsed = splitFirstToken(parsed.tail);
+        const apply_action = apply_parsed.head;
+        const apply_rest = apply_parsed.tail;
+
+        if (std.ascii.eqlIgnoreCase(apply_action, "set")) {
+            const path_and_value = splitFirstToken(apply_rest);
+            const path = path_and_value.head;
+            const value_raw = std.mem.trim(u8, path_and_value.tail, " \t");
+            if (path.len == 0 or value_raw.len == 0) {
+                return try self.allocator.dupe(u8, "Usage: /config apply set <path> <value>");
+            }
+
+            var result = config_mutator.mutateDefaultConfig(self.allocator, .set, path, value_raw, .{ .apply = true }) catch |err| {
+                return try std.fmt.allocPrint(self.allocator, "Config apply set failed: {s}", .{@errorName(err)});
+            };
+            defer config_mutator.freeMutationResult(self.allocator, &result);
+
+            var hot_applied = false;
+            if (result.applied and !result.requires_restart) {
+                hot_applied = hotApplyConfigChange(self, .set, result.path, result.new_value_json) catch false;
+            }
+            const response = try formatConfigMutationResponse(self.allocator, .set, &result, false, hot_applied);
+            return response;
+        }
+
+        if (std.ascii.eqlIgnoreCase(apply_action, "unset")) {
+            const path = std.mem.trim(u8, apply_rest, " \t");
+            if (path.len == 0) {
+                return try self.allocator.dupe(u8, "Usage: /config apply unset <path>");
+            }
+
+            var result = config_mutator.mutateDefaultConfig(self.allocator, .unset, path, null, .{ .apply = true }) catch |err| {
+                return try std.fmt.allocPrint(self.allocator, "Config apply unset failed: {s}", .{@errorName(err)});
+            };
+            defer config_mutator.freeMutationResult(self.allocator, &result);
+
+            const response = try formatConfigMutationResponse(self.allocator, .unset, &result, false, false);
+            return response;
+        }
+
+        return try self.allocator.dupe(u8, "Usage: /config apply <set|unset> ...");
+    }
+
+    return try self.allocator.dupe(
+        u8,
+        "Usage:\n" ++
+            "  /config [show]\n" ++
+            "  /config get <path>\n" ++
+            "  /config set <path> <value>            (dry-run preview)\n" ++
+            "  /config unset <path>                  (dry-run preview)\n" ++
+            "  /config apply set <path> <value>\n" ++
+            "  /config apply unset <path>\n" ++
+            "  /config validate",
+    );
 }
 
 fn handleSkillCommand(self: anytype, arg: []const u8) ![]const u8 {
@@ -1529,7 +1832,7 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             \\  /export-session, /export
             \\  /session ttl <duration|off>
             \\  /subagents, /agents, /focus, /unfocus, /kill, /steer, /tell
-            \\  /config, /debug
+            \\  /config, /capabilities, /debug
             \\  /dock-telegram, /dock-discord, /dock-slack
             \\  /activation, /send, /elevated, /bash, /poll, /skill
             \\  /doctor — memory subsystem diagnostics
@@ -1548,6 +1851,14 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
             return try self.formatModelStatus();
         }
         try setModelName(self, cmd.arg);
+        invalidateSystemPromptCache(self);
+        persistSelectedModelToConfig(self, cmd.arg) catch |err| {
+            return try std.fmt.allocPrint(
+                self.allocator,
+                "Switched to model: {s}\nWarning: could not persist model to config.json ({s})",
+                .{ cmd.arg, @errorName(err) },
+            );
+        };
         return try std.fmt.allocPrint(self.allocator, "Switched to model: {s}", .{cmd.arg});
     }
 
@@ -1580,6 +1891,7 @@ pub fn handleSlashCommand(self: anytype, message: []const u8) !?[]const u8 {
     if (isSlashName(cmd, "tell")) return try handleTellCommand(self, cmd.arg);
 
     if (isSlashName(cmd, "config")) return try handleConfigCommand(self, cmd.arg);
+    if (isSlashName(cmd, "capabilities")) return try handleCapabilitiesCommand(self, cmd.arg);
     if (isSlashName(cmd, "debug")) {
         if (std.ascii.eqlIgnoreCase(cmd.arg, "show") or cmd.arg.len == 0) return try formatStatus(self);
         if (std.ascii.eqlIgnoreCase(cmd.arg, "reset")) {

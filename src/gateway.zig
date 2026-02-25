@@ -1295,8 +1295,9 @@ pub fn sendTelegramReply(allocator: std.mem.Allocator, bot_token: []const u8, ch
 
 fn userFacingAgentError(err: anyerror) []const u8 {
     return switch (err) {
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
         error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
+        error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
         error.NoResponseContent => "Model returned an empty response. Please try again.",
         error.OutOfMemory => "Out of memory.",
         else => "An error occurred. Try again.",
@@ -1305,8 +1306,9 @@ fn userFacingAgentError(err: anyerror) []const u8 {
 
 fn userFacingAgentErrorJson(err: anyerror) []const u8 {
     return switch (err) {
-        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "{\"error\":\"network error\"}",
+        error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "{\"error\":\"network error\"}",
         error.ProviderDoesNotSupportVision => "{\"error\":\"provider does not support image input\"}",
+        error.AllProvidersFailed => "{\"error\":\"all providers failed for this request\"}",
         error.NoResponseContent => "{\"error\":\"model returned empty response\"}",
         error.OutOfMemory => "{\"error\":\"out of memory\"}",
         else => "{\"error\":\"agent failure\"}",
@@ -2099,6 +2101,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     var tools_slice: []const tools_mod.Tool = &.{};
     var mem_rt: ?memory_mod.MemoryRuntime = null;
     var noop_obs_gateway = observability.NoopObserver{};
+    const needs_local_agent = event_bus == null;
 
     if (config_opt) |cfg_ptr| {
         const cfg = cfg_ptr;
@@ -2141,31 +2144,35 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
             state.lark_account_id = lark_cfg.account_id;
         }
 
-        provider_bundle_opt = try providers.runtime_bundle.RuntimeProviderBundle.init(allocator, cfg);
+        // In daemon mode (`event_bus` is present), inbound processing is delegated to
+        // the bus + channel runtime. Avoid creating a second local agent runtime here.
+        if (needs_local_agent) {
+            provider_bundle_opt = try providers.runtime_bundle.RuntimeProviderBundle.init(allocator, cfg);
 
-        if (provider_bundle_opt) |*bundle| {
-            const provider_i: providers.Provider = bundle.provider();
-            const resolved_api_key = bundle.primaryApiKey();
+            if (provider_bundle_opt) |*bundle| {
+                const provider_i: providers.Provider = bundle.provider();
+                const resolved_api_key = bundle.primaryApiKey();
 
-            // Optional memory backend.
-            mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);
+                // Optional memory backend.
+                mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);
 
-            // Tools.
-            tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
-                .http_enabled = cfg.http_request.enabled,
-                .browser_enabled = cfg.browser.enabled,
-                .screenshot_enabled = true,
-                .agents = cfg.agents,
-                .fallback_api_key = resolved_api_key,
-            }) catch &.{};
+                // Tools.
+                tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
+                    .http_enabled = cfg.http_request.enabled,
+                    .browser_enabled = cfg.browser.enabled,
+                    .screenshot_enabled = true,
+                    .agents = cfg.agents,
+                    .fallback_api_key = resolved_api_key,
+                }) catch &.{};
 
-            const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
-            var sm = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
-            if (mem_rt) |*rt| {
-                sm.mem_rt = rt;
-                tools_mod.bindMemoryRuntime(tools_slice, rt);
+                const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
+                var sm = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
+                if (mem_rt) |*rt| {
+                    sm.mem_rt = rt;
+                    tools_mod.bindMemoryRuntime(tools_slice, rt);
+                }
+                session_mgr_opt = sm;
             }
-            session_mgr_opt = sm;
         }
     }
     if (state.pairing_guard == null) {
@@ -2189,7 +2196,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     try stdout.print("Gateway listening on {s}:{d}\n", .{ host, port });
     try stdout.flush();
     if (config_opt) |cfg| {
-        cfg.printModelConfig();
+        // In daemon mode the parent already prints model/provider.
+        if (config_ptr == null) cfg.printModelConfig();
     }
     if (state.pairing_guard) |*guard| {
         if (guard.pairingCode()) |code| {
@@ -3415,6 +3423,13 @@ test "userFacingAgentError maps NoResponseContent" {
     );
 }
 
+test "userFacingAgentError maps AllProvidersFailed" {
+    try std.testing.expectEqualStrings(
+        "All configured providers failed for this request. Check model/provider compatibility and credentials.",
+        userFacingAgentError(error.AllProvidersFailed),
+    );
+}
+
 test "userFacingAgentError maps generic error fallback" {
     try std.testing.expectEqualStrings(
         "An error occurred. Try again.",
@@ -3426,6 +3441,13 @@ test "userFacingAgentErrorJson maps NoResponseContent" {
     try std.testing.expectEqualStrings(
         "{\"error\":\"model returned empty response\"}",
         userFacingAgentErrorJson(error.NoResponseContent),
+    );
+}
+
+test "userFacingAgentErrorJson maps AllProvidersFailed" {
+    try std.testing.expectEqualStrings(
+        "{\"error\":\"all providers failed for this request\"}",
+        userFacingAgentErrorJson(error.AllProvidersFailed),
     );
 }
 

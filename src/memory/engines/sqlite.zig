@@ -14,12 +14,14 @@ const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
 const MemoryEntry = root.MemoryEntry;
+const log = std.log.scoped(.memory_sqlite);
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
 pub const SQLITE_STATIC: c.sqlite3_destructor_type = null;
+const BUSY_TIMEOUT_MS: c_int = 5000;
 
 pub const SqliteMemory = struct {
     db: ?*c.sqlite3,
@@ -34,6 +36,10 @@ pub const SqliteMemory = struct {
         if (rc != c.SQLITE_OK) {
             if (db) |d| _ = c.sqlite3_close(d);
             return error.SqliteOpenFailed;
+        }
+        if (db) |d| {
+            // Reduce startup flakiness when multiple runtimes touch the same DB.
+            _ = c.sqlite3_busy_timeout(d, BUSY_TIMEOUT_MS);
         }
 
         var self_ = Self{ .db = db, .allocator = allocator };
@@ -50,18 +56,35 @@ pub const SqliteMemory = struct {
         }
     }
 
+    fn logExecFailure(self: *Self, context: []const u8, sql: []const u8, rc: c_int, err_msg: [*c]u8) void {
+        if (err_msg) |msg| {
+            const msg_text = std.mem.span(msg);
+            log.warn("sqlite {s} failed (rc={d}, sql={s}): {s}", .{ context, rc, sql, msg_text });
+            return;
+        }
+        if (self.db) |db| {
+            const msg_text = std.mem.span(c.sqlite3_errmsg(db));
+            log.warn("sqlite {s} failed (rc={d}, sql={s}): {s}", .{ context, rc, sql, msg_text });
+            return;
+        }
+        log.warn("sqlite {s} failed (rc={d}, sql={s})", .{ context, rc, sql });
+    }
+
     fn configurePragmas(self: *Self) !void {
-        const pragmas =
-            \\PRAGMA journal_mode = WAL;
-            \\PRAGMA synchronous  = NORMAL;
-            \\PRAGMA temp_store   = MEMORY;
-            \\PRAGMA cache_size   = -2000;
-        ;
-        var err_msg: [*c]u8 = null;
-        const rc = c.sqlite3_exec(self.db, pragmas, null, null, &err_msg);
-        if (rc != c.SQLITE_OK) {
+        // Pragmas are tuning knobs; failure should not prevent startup.
+        const pragmas = [_][:0]const u8{
+            "PRAGMA journal_mode = WAL;",
+            "PRAGMA synchronous  = NORMAL;",
+            "PRAGMA temp_store   = MEMORY;",
+            "PRAGMA cache_size   = -2000;",
+        };
+        for (pragmas) |pragma| {
+            var err_msg: [*c]u8 = null;
+            const rc = c.sqlite3_exec(self.db, pragma, null, null, &err_msg);
+            if (rc != c.SQLITE_OK) {
+                self.logExecFailure("pragma", pragma, rc, err_msg);
+            }
             if (err_msg) |msg| c.sqlite3_free(msg);
-            return error.MigrationFailed;
         }
     }
 
@@ -140,6 +163,7 @@ pub const SqliteMemory = struct {
         var err_msg: [*c]u8 = null;
         const rc = c.sqlite3_exec(self.db, sql, null, null, &err_msg);
         if (rc != c.SQLITE_OK) {
+            self.logExecFailure("schema migration", "CREATE TABLE/FTS/triggers", rc, err_msg);
             if (err_msg) |msg| c.sqlite3_free(msg);
             return error.MigrationFailed;
         }
@@ -157,7 +181,15 @@ pub const SqliteMemory = struct {
             &err_msg,
         );
         if (rc != c.SQLITE_OK) {
-            // "duplicate column name" is expected on databases that already have the column
+            // "duplicate column name" is expected on databases that already have the column.
+            var ignore_error = false;
+            if (err_msg) |msg| {
+                const msg_text = std.mem.span(msg);
+                ignore_error = std.mem.indexOf(u8, msg_text, "duplicate column name") != null;
+            }
+            if (!ignore_error) {
+                self.logExecFailure("session_id migration", "ALTER TABLE memories ADD COLUMN session_id TEXT", rc, err_msg);
+            }
             if (err_msg) |msg| c.sqlite3_free(msg);
         }
         // Ensure index exists regardless
@@ -170,6 +202,7 @@ pub const SqliteMemory = struct {
             &err_msg2,
         );
         if (rc2 != c.SQLITE_OK) {
+            self.logExecFailure("session_id migration", "CREATE INDEX IF NOT EXISTS idx_memories_session", rc2, err_msg2);
             if (err_msg2) |msg| c.sqlite3_free(msg);
         }
     }
@@ -772,6 +805,21 @@ test "sqlite memory init with in-memory db" {
     var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem.deinit();
     try mem.saveMessage("test-session", "user", "hello");
+}
+
+test "sqlite init configures busy timeout" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const prep_rc = c.sqlite3_prepare_v2(mem.db, "PRAGMA busy_timeout;", -1, &stmt, null);
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), prep_rc);
+    defer _ = c.sqlite3_finalize(stmt);
+
+    const step_rc = c.sqlite3_step(stmt);
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_ROW), step_rc);
+    const timeout_ms = c.sqlite3_column_int(stmt, 0);
+    try std.testing.expect(timeout_ms >= BUSY_TIMEOUT_MS);
 }
 
 test "sqlite name" {

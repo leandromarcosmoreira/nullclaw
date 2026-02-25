@@ -16,6 +16,7 @@ pub const PromptContext = struct {
     workspace_dir: []const u8,
     model_name: []const u8,
     tools: []const Tool,
+    capabilities_section: ?[]const u8 = null,
 };
 
 /// Build the full system prompt from workspace identity files, tools, and runtime context.
@@ -33,6 +34,10 @@ pub fn buildSystemPrompt(
     // Tools section
     try buildToolsSection(w, ctx.tools);
 
+    if (ctx.capabilities_section) |section| {
+        try w.writeAll(section);
+    }
+
     // Safety section
     try w.writeAll("## Safety\n\n");
     try w.writeAll("- Do not exfiltrate private data.\n");
@@ -40,6 +45,7 @@ pub fn buildSystemPrompt(
     try w.writeAll("- Do not bypass oversight or approval mechanisms.\n");
     try w.writeAll("- Prefer `trash` over `rm`.\n");
     try w.writeAll("- When in doubt, ask before acting externally.\n\n");
+    try w.writeAll("- Never expose internal memory implementation keys (for example: `autosave_*`, `last_hygiene_at`) in user-facing replies.\n\n");
 
     // Skills section
     try appendSkillsSection(allocator, w, ctx.workspace_dir);

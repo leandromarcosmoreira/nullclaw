@@ -1,5 +1,12 @@
 const std = @import("std");
 
+/// Default context token budget used by agent compaction/context management.
+/// Kept aligned with OpenClaw fallback (`DEFAULT_CONTEXT_TOKENS`).
+pub const DEFAULT_AGENT_TOKEN_LIMIT: u64 = 200_000;
+/// Default generation cap when model/provider metadata does not define max output.
+/// Kept aligned with OpenClaw's `DEFAULT_MODEL_MAX_TOKENS`.
+pub const DEFAULT_MODEL_MAX_TOKENS: u32 = 8192;
+
 // ── Autonomy Level ──────────────────────────────────────────────
 
 /// Re-exported from security/policy.zig — single source of truth (with methods).
@@ -109,7 +116,10 @@ pub const AgentConfig = struct {
     max_history_messages: u32 = 50,
     parallel_tools: bool = false,
     tool_dispatcher: []const u8 = "auto",
-    token_limit: u64 = 128_000,
+    token_limit: u64 = DEFAULT_AGENT_TOKEN_LIMIT,
+    /// Internal parse marker: true only when token_limit is explicitly set in config.
+    /// Not serialized; used to distinguish override vs default fallback chain.
+    token_limit_explicit: bool = false,
     session_idle_timeout_secs: u64 = 1800, // evict idle sessions after 30 min
     compaction_keep_recent: u32 = 20,
     compaction_max_summary_chars: u32 = 2_000,

@@ -555,6 +555,7 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     if (memory_backend) |mb| {
         const desc = try resolveMemoryBackendForQuickSetup(mb);
         cfg.memory.backend = desc.name;
+        cfg.memory.profile = memoryProfileForBackend(desc.name);
         cfg.memory.auto_save = desc.auto_save_default;
     }
 
@@ -616,7 +617,7 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
-    try stdout.writeAll("Channel configuration status:\n\n");
+    var input_buf: [512]u8 = undefined;
 
     var cfg = Config.load(allocator) catch {
         try stdout.writeAll("No existing config found. Run `nullclaw onboard` first.\n");
@@ -625,12 +626,22 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     };
     defer cfg.deinit();
 
+    try stdout.writeAll("Channel setup wizard:\n");
+    const changed = try configureChannelsInteractive(allocator, &cfg, stdout, &input_buf, "");
+    if (changed) {
+        try cfg.save();
+        try stdout.writeAll("Channel configuration saved.\n\n");
+    } else {
+        try stdout.writeAll("No channel changes applied.\n\n");
+    }
+
+    try stdout.writeAll("Channel configuration status:\n\n");
     for (channel_catalog.known_channels) |meta| {
         var status_buf: [64]u8 = undefined;
         const status_text = channel_catalog.statusText(&cfg, meta, &status_buf);
         try stdout.print("  {s}: {s}\n", .{ meta.label, status_text });
     }
-    try stdout.writeAll("\nTo modify channels, edit your config file:\n");
+    try stdout.writeAll("\nConfig file:\n");
     try stdout.print("  {s}\n", .{cfg.config_path});
     try stdout.flush();
 }
@@ -667,6 +678,390 @@ fn promptChoice(out: *std.Io.Writer, buf: []u8, max: usize, default_idx: usize) 
 
 const tunnel_options = [_][]const u8{ "none", "cloudflare", "ngrok", "tailscale" };
 const autonomy_options = [_][]const u8{ "supervised", "autonomous", "fully_autonomous" };
+const wizard_memory_backend_order = [_][]const u8{
+    "sqlite",
+    "markdown",
+    "memory",
+    "none",
+    "lucid",
+    "redis",
+    "lancedb",
+    "postgres",
+    "api",
+};
+
+fn selectableBackendsForWizard(allocator: std.mem.Allocator) ![]const *const memory_root.BackendDescriptor {
+    var out: std.ArrayListUnmanaged(*const memory_root.BackendDescriptor) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (wizard_memory_backend_order) |name| {
+        if (memory_root.findBackend(name)) |desc| {
+            try out.append(allocator, desc);
+        }
+    }
+
+    if (out.items.len == 0) return error.NoSelectableBackends;
+    return out.toOwnedSlice(allocator);
+}
+
+fn memoryProfileForBackend(backend: []const u8) []const u8 {
+    if (std.mem.eql(u8, backend, "sqlite")) return "local_keyword";
+    if (std.mem.eql(u8, backend, "markdown")) return "markdown_only";
+    if (std.mem.eql(u8, backend, "postgres")) return "postgres_keyword";
+    if (std.mem.eql(u8, backend, "none")) return "minimal_none";
+    return "custom";
+}
+
+fn isWizardInteractiveChannel(channel_id: channel_catalog.ChannelId) bool {
+    return switch (channel_id) {
+        .telegram, .discord, .slack, .webhook, .mattermost, .matrix, .signal => true,
+        else => false,
+    };
+}
+
+fn appendUniqueIndex(list: *std.ArrayListUnmanaged(usize), allocator: std.mem.Allocator, idx: usize) !void {
+    for (list.items) |existing| {
+        if (existing == idx) return;
+    }
+    try list.append(allocator, idx);
+}
+
+fn findChannelOptionIndex(token: []const u8, options: []const channel_catalog.ChannelMeta) ?usize {
+    if (std.fmt.parseInt(usize, token, 10)) |num| {
+        if (num >= 1 and num <= options.len) return num - 1;
+    } else |_| {}
+
+    for (options, 0..) |meta, idx| {
+        if (std.ascii.eqlIgnoreCase(meta.key, token)) return idx;
+    }
+    return null;
+}
+
+fn configureChannelsInteractive(
+    allocator: std.mem.Allocator,
+    cfg: *Config,
+    out: *std.Io.Writer,
+    input_buf: []u8,
+    prefix: []const u8,
+) !bool {
+    var options: std.ArrayListUnmanaged(channel_catalog.ChannelMeta) = .empty;
+    defer options.deinit(allocator);
+    var manual_only: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer manual_only.deinit(allocator);
+
+    for (channel_catalog.known_channels) |meta| {
+        if (meta.id == .cli) continue;
+        if (!channel_catalog.isBuildEnabled(meta.id)) continue;
+        if (!isWizardInteractiveChannel(meta.id)) {
+            try manual_only.append(allocator, meta.label);
+            continue;
+        }
+        try options.append(allocator, meta);
+    }
+
+    if (options.items.len == 0) {
+        try out.print("{s}No channel backends are enabled in this build.\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}Channel setup:\n", .{prefix});
+    for (options.items, 0..) |meta, idx| {
+        var status_buf: [64]u8 = undefined;
+        const status = channel_catalog.statusText(cfg, meta, &status_buf);
+        try out.print("{s}  [{d}] {s} ({s})\n", .{ prefix, idx + 1, meta.label, status });
+    }
+    if (manual_only.items.len > 0) {
+        try out.print("{s}  Other channels in this build require manual config:", .{prefix});
+        for (manual_only.items) |label| {
+            try out.print(" {s}", .{label});
+        }
+        try out.print("\n", .{});
+    }
+    try out.print("{s}Select channels (comma-separated numbers/keys, Enter to skip): ", .{prefix});
+
+    const selection_input = prompt(out, input_buf, "", "") orelse {
+        try out.print("\n{s}Channel setup aborted.\n", .{prefix});
+        return false;
+    };
+    if (selection_input.len == 0) {
+        try out.print("{s}-> Skipped channel setup.\n", .{prefix});
+        return false;
+    }
+
+    var selected: std.ArrayListUnmanaged(usize) = .empty;
+    defer selected.deinit(allocator);
+
+    var tokens = std.mem.tokenizeAny(u8, selection_input, ", \t");
+    while (tokens.next()) |token| {
+        if (findChannelOptionIndex(token, options.items)) |idx| {
+            try appendUniqueIndex(&selected, allocator, idx);
+        } else {
+            try out.print("{s}  ! Unknown channel '{s}' (ignored)\n", .{ prefix, token });
+        }
+    }
+
+    if (selected.items.len == 0) {
+        try out.print("{s}-> No valid channel selections.\n", .{prefix});
+        return false;
+    }
+
+    var changed = false;
+    for (selected.items) |idx| {
+        const meta = options.items[idx];
+        const configured = try configureSingleChannel(cfg, out, input_buf, prefix, meta);
+        changed = changed or configured;
+    }
+    return changed;
+}
+
+fn configureSingleChannel(
+    cfg: *Config,
+    out: *std.Io.Writer,
+    input_buf: []u8,
+    prefix: []const u8,
+    meta: channel_catalog.ChannelMeta,
+) !bool {
+    return switch (meta.id) {
+        .telegram => configureTelegramChannel(cfg, out, input_buf, prefix),
+        .discord => configureDiscordChannel(cfg, out, input_buf, prefix),
+        .slack => configureSlackChannel(cfg, out, input_buf, prefix),
+        .matrix => configureMatrixChannel(cfg, out, input_buf, prefix),
+        .mattermost => configureMattermostChannel(cfg, out, input_buf, prefix),
+        .signal => configureSignalChannel(cfg, out, input_buf, prefix),
+        .webhook => configureWebhookChannel(cfg, out, input_buf, prefix),
+        else => blk: {
+            try out.print("{s}  {s}: interactive setup not implemented yet. Edit {s} manually.\n", .{ prefix, meta.label, cfg.config_path });
+            break :blk false;
+        },
+    };
+}
+
+fn parseTelegramAllowFrom(allocator: std.mem.Allocator, raw: []const u8) ![]const []const u8 {
+    var allow: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (allow.items) |entry| allocator.free(entry);
+        allow.deinit(allocator);
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, raw, ", \t");
+    while (tokens.next()) |token| {
+        var normalized = std.mem.trim(u8, token, " \t\r\n");
+        if (normalized.len == 0) continue;
+        if (normalized[0] == '@') {
+            normalized = normalized[1..];
+            if (normalized.len == 0) continue;
+        }
+
+        var exists = false;
+        for (allow.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, normalized)) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) continue;
+
+        try allow.append(allocator, try allocator.dupe(u8, normalized));
+    }
+
+    if (allow.items.len == 0) {
+        try allow.append(allocator, try allocator.dupe(u8, "*"));
+    }
+
+    return allow.toOwnedSlice(allocator);
+}
+
+fn configureTelegramChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Telegram bot token (required, Enter to skip): ", .{prefix});
+    const token = prompt(out, input_buf, "", "") orelse return false;
+    if (token.len == 0) {
+        try out.print("{s}  -> Telegram skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Telegram allow_from (username/user_id, comma-separated) [*]: ", .{prefix});
+    const allow_input = prompt(out, input_buf, "", "") orelse return false;
+    const allow_from = try parseTelegramAllowFrom(cfg.allocator, allow_input);
+
+    const accounts = try cfg.allocator.alloc(config_mod.TelegramConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .bot_token = try cfg.allocator.dupe(u8, token),
+        .allow_from = allow_from,
+    };
+    cfg.channels.telegram = accounts;
+    if (allow_from.len == 1 and std.mem.eql(u8, allow_from[0], "*")) {
+        try out.print("{s}  -> Telegram configured (allow_from=*)\n", .{prefix});
+    } else {
+        try out.print("{s}  -> Telegram configured ({d} allow_from entries)\n", .{ prefix, allow_from.len });
+    }
+    return true;
+}
+
+fn configureDiscordChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Discord bot token (required, Enter to skip): ", .{prefix});
+    const token = prompt(out, input_buf, "", "") orelse return false;
+    if (token.len == 0) {
+        try out.print("{s}  -> Discord skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Discord guild ID (optional): ", .{prefix});
+    const guild_id = prompt(out, input_buf, "", "") orelse return false;
+
+    const accounts = try cfg.allocator.alloc(config_mod.DiscordConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .token = try cfg.allocator.dupe(u8, token),
+        .guild_id = if (guild_id.len > 0) try cfg.allocator.dupe(u8, guild_id) else null,
+    };
+    cfg.channels.discord = accounts;
+    try out.print("{s}  -> Discord configured\n", .{prefix});
+    return true;
+}
+
+fn configureSlackChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Slack bot token (required, Enter to skip): ", .{prefix});
+    const bot_token = prompt(out, input_buf, "", "") orelse return false;
+    if (bot_token.len == 0) {
+        try out.print("{s}  -> Slack skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Slack app token (optional, for socket mode): ", .{prefix});
+    const app_token = prompt(out, input_buf, "", "") orelse return false;
+
+    var signing_secret: ?[]const u8 = null;
+    if (app_token.len == 0) {
+        try out.print("{s}  Slack signing secret (optional, for HTTP mode): ", .{prefix});
+        const secret = prompt(out, input_buf, "", "") orelse return false;
+        if (secret.len > 0) signing_secret = try cfg.allocator.dupe(u8, secret);
+    }
+
+    const accounts = try cfg.allocator.alloc(config_mod.SlackConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .mode = if (app_token.len > 0) .socket else .http,
+        .bot_token = try cfg.allocator.dupe(u8, bot_token),
+        .app_token = if (app_token.len > 0) try cfg.allocator.dupe(u8, app_token) else null,
+        .signing_secret = signing_secret,
+    };
+    cfg.channels.slack = accounts;
+    try out.print("{s}  -> Slack configured\n", .{prefix});
+    return true;
+}
+
+fn configureMattermostChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Mattermost base URL (required, Enter to skip): ", .{prefix});
+    const base_url = prompt(out, input_buf, "", "") orelse return false;
+    if (base_url.len == 0) {
+        try out.print("{s}  -> Mattermost skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Mattermost bot token (required, Enter to skip): ", .{prefix});
+    const bot_token = prompt(out, input_buf, "", "") orelse return false;
+    if (bot_token.len == 0) {
+        try out.print("{s}  -> Mattermost skipped\n", .{prefix});
+        return false;
+    }
+
+    const accounts = try cfg.allocator.alloc(config_mod.MattermostConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .bot_token = try cfg.allocator.dupe(u8, bot_token),
+        .base_url = try cfg.allocator.dupe(u8, base_url),
+    };
+    cfg.channels.mattermost = accounts;
+    try out.print("{s}  -> Mattermost configured\n", .{prefix});
+    return true;
+}
+
+fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Matrix homeserver URL (required, Enter to skip): ", .{prefix});
+    const homeserver = prompt(out, input_buf, "", "") orelse return false;
+    if (homeserver.len == 0) {
+        try out.print("{s}  -> Matrix skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Matrix access token (required, Enter to skip): ", .{prefix});
+    const access_token = prompt(out, input_buf, "", "") orelse return false;
+    if (access_token.len == 0) {
+        try out.print("{s}  -> Matrix skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Matrix room ID (required, Enter to skip): ", .{prefix});
+    const room_id = prompt(out, input_buf, "", "") orelse return false;
+    if (room_id.len == 0) {
+        try out.print("{s}  -> Matrix skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Matrix user ID (optional, for typing indicators): ", .{prefix});
+    const user_id = prompt(out, input_buf, "", "") orelse return false;
+
+    const accounts = try cfg.allocator.alloc(config_mod.MatrixConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .homeserver = try cfg.allocator.dupe(u8, homeserver),
+        .access_token = try cfg.allocator.dupe(u8, access_token),
+        .room_id = try cfg.allocator.dupe(u8, room_id),
+        .user_id = if (user_id.len > 0) try cfg.allocator.dupe(u8, user_id) else null,
+        .allow_from = &[_][]const u8{"*"},
+    };
+    cfg.channels.matrix = accounts;
+    try out.print("{s}  -> Matrix configured (allow_from=*)\n", .{prefix});
+    return true;
+}
+
+fn configureSignalChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Signal daemon URL [http://127.0.0.1:8080]: ", .{prefix});
+    const http_url = prompt(out, input_buf, "", "http://127.0.0.1:8080") orelse return false;
+    if (http_url.len == 0) {
+        try out.print("{s}  -> Signal skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Signal account (E.164, required, Enter to skip): ", .{prefix});
+    const account = prompt(out, input_buf, "", "") orelse return false;
+    if (account.len == 0) {
+        try out.print("{s}  -> Signal skipped\n", .{prefix});
+        return false;
+    }
+
+    try out.print("{s}  Ignore attachments? [y/N]: ", .{prefix});
+    const ignore_input = prompt(out, input_buf, "", "n") orelse return false;
+    const ignore_attachments = ignore_input.len > 0 and (ignore_input[0] == 'y' or ignore_input[0] == 'Y');
+
+    const accounts = try cfg.allocator.alloc(config_mod.SignalConfig, 1);
+    accounts[0] = .{
+        .account_id = "default",
+        .http_url = try cfg.allocator.dupe(u8, http_url),
+        .account = try cfg.allocator.dupe(u8, account),
+        .allow_from = &[_][]const u8{"*"},
+        .ignore_attachments = ignore_attachments,
+    };
+    cfg.channels.signal = accounts;
+    try out.print("{s}  -> Signal configured (allow_from=*)\n", .{prefix});
+    return true;
+}
+
+fn configureWebhookChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    try out.print("{s}  Webhook port [8080]: ", .{prefix});
+    const port_input = prompt(out, input_buf, "", "8080") orelse return false;
+    const port = std.fmt.parseInt(u16, port_input, 10) catch 8080;
+
+    try out.print("{s}  Webhook secret (optional): ", .{prefix});
+    const secret_input = prompt(out, input_buf, "", "") orelse return false;
+    cfg.channels.webhook = .{
+        .port = port,
+        .secret = if (secret_input.len > 0) try cfg.allocator.dupe(u8, secret_input) else null,
+    };
+    try out.print("{s}  -> Webhook configured\n", .{prefix});
+    return true;
+}
 
 /// Interactive wizard entry point — runs the full setup interactively.
 pub fn runWizard(allocator: std.mem.Allocator) !void {
@@ -764,7 +1159,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{cfg.default_model.?});
 
     // ── Step 4: Memory backend ──
-    const backends = selectableBackends();
+    const backends = try selectableBackendsForWizard(allocator);
+    defer allocator.free(backends);
     try out.writeAll("  Step 4/8: Memory backend\n");
     for (backends, 0..) |b, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, b.label });
@@ -776,6 +1172,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         return;
     };
     cfg.memory.backend = backends[mem_idx].name;
+    cfg.memory.profile = memoryProfileForBackend(backends[mem_idx].name);
     cfg.memory.auto_save = backends[mem_idx].auto_save_default;
     try out.print("  -> {s}\n\n", .{backends[mem_idx].label});
 
@@ -800,23 +1197,42 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         try out.flush();
         return;
     };
-    cfg.autonomy.level = switch (autonomy_idx) {
-        0 => .supervised,
-        1 => .read_only,
-        2 => .full,
-        else => .supervised,
-    };
+    switch (autonomy_idx) {
+        0 => {
+            cfg.autonomy.level = .supervised;
+            cfg.autonomy.require_approval_for_medium_risk = true;
+            cfg.autonomy.block_high_risk_commands = true;
+        },
+        1 => {
+            // "autonomous": fully acts, but still blocks high-risk commands.
+            cfg.autonomy.level = .full;
+            cfg.autonomy.require_approval_for_medium_risk = false;
+            cfg.autonomy.block_high_risk_commands = true;
+        },
+        2 => {
+            // "fully_autonomous": fully acts and does not hard-block high-risk commands.
+            cfg.autonomy.level = .full;
+            cfg.autonomy.require_approval_for_medium_risk = false;
+            cfg.autonomy.block_high_risk_commands = false;
+        },
+        else => {
+            cfg.autonomy.level = .supervised;
+            cfg.autonomy.require_approval_for_medium_risk = true;
+            cfg.autonomy.block_high_risk_commands = true;
+        },
+    }
     try out.print("  -> {s}\n\n", .{autonomy_options[autonomy_idx]});
 
     // ── Step 7: Channels ──
-    try out.writeAll("  Step 7/8: Configure channels now? [y/N]: ");
-    const chan_input = prompt(out, &input_buf, "", "n") orelse {
+    try out.writeAll("  Step 7/8: Configure channels now? [Y/n]: ");
+    const chan_input = prompt(out, &input_buf, "", "y") orelse {
         try out.writeAll("\n  Aborted.\n");
         try out.flush();
         return;
     };
     if (chan_input.len > 0 and (chan_input[0] == 'y' or chan_input[0] == 'Y')) {
-        try out.writeAll("  -> Edit channels in config file after setup.\n\n");
+        _ = try configureChannelsInteractive(allocator, &cfg, out, &input_buf, "  ");
+        try out.writeAll("\n");
     } else {
         try out.writeAll("  -> Skipped (CLI enabled by default)\n\n");
     }
@@ -1263,6 +1679,59 @@ test "selectableBackends returns non-empty" {
     try std.testing.expectEqualStrings("markdown", backends[0].name);
 }
 
+test "selectableBackendsForWizard prioritizes sqlite and keeps api last" {
+    const backends = try selectableBackendsForWizard(std.testing.allocator);
+    defer std.testing.allocator.free(backends);
+
+    if (memory_root.findBackend("sqlite") != null) {
+        try std.testing.expectEqualStrings("sqlite", backends[0].name);
+    }
+    if (memory_root.findBackend("sqlite") != null and memory_root.findBackend("markdown") != null and backends.len >= 2) {
+        try std.testing.expectEqualStrings("markdown", backends[1].name);
+    }
+    if (memory_root.findBackend("api") != null) {
+        try std.testing.expectEqualStrings("api", backends[backends.len - 1].name);
+    }
+}
+
+test "memoryProfileForBackend maps common backends" {
+    try std.testing.expectEqualStrings("local_keyword", memoryProfileForBackend("sqlite"));
+    try std.testing.expectEqualStrings("markdown_only", memoryProfileForBackend("markdown"));
+    try std.testing.expectEqualStrings("postgres_keyword", memoryProfileForBackend("postgres"));
+    try std.testing.expectEqualStrings("minimal_none", memoryProfileForBackend("none"));
+    try std.testing.expectEqualStrings("custom", memoryProfileForBackend("redis"));
+}
+
+test "isWizardInteractiveChannel includes supported onboarding channels" {
+    try std.testing.expect(isWizardInteractiveChannel(.telegram));
+    try std.testing.expect(isWizardInteractiveChannel(.slack));
+    try std.testing.expect(isWizardInteractiveChannel(.matrix));
+    try std.testing.expect(isWizardInteractiveChannel(.signal));
+    try std.testing.expect(!isWizardInteractiveChannel(.whatsapp));
+}
+
+test "parseTelegramAllowFrom defaults to wildcard" {
+    const allow = try parseTelegramAllowFrom(std.testing.allocator, "");
+    defer {
+        for (allow) |entry| std.testing.allocator.free(entry);
+        std.testing.allocator.free(allow);
+    }
+    try std.testing.expectEqual(@as(usize, 1), allow.len);
+    try std.testing.expectEqualStrings("*", allow[0]);
+}
+
+test "parseTelegramAllowFrom normalizes, deduplicates and strips @" {
+    const allow = try parseTelegramAllowFrom(std.testing.allocator, " @Alice, alice  12345, @bob ");
+    defer {
+        for (allow) |entry| std.testing.allocator.free(entry);
+        std.testing.allocator.free(allow);
+    }
+    try std.testing.expectEqual(@as(usize, 3), allow.len);
+    try std.testing.expectEqualStrings("Alice", allow[0]);
+    try std.testing.expectEqualStrings("12345", allow[1]);
+    try std.testing.expectEqualStrings("bob", allow[2]);
+}
+
 test "BANNER contains descriptive text" {
     try std.testing.expect(std.mem.indexOf(u8, BANNER, "smallest AI assistant") != null);
 }
@@ -1523,12 +1992,23 @@ test "wizard promptChoice returns default for out-of-range" {
     // The wizard would clamp to default (0) for out of range input
 }
 
+test "findChannelOptionIndex supports number and key" {
+    const options = [_]channel_catalog.ChannelMeta{
+        .{ .id = .telegram, .key = "telegram", .label = "Telegram", .configured_message = "Telegram configured", .listener_mode = .polling },
+        .{ .id = .discord, .key = "discord", .label = "Discord", .configured_message = "Discord configured", .listener_mode = .gateway_loop },
+    };
+
+    try std.testing.expectEqual(@as(?usize, 0), findChannelOptionIndex("1", &options));
+    try std.testing.expectEqual(@as(?usize, 1), findChannelOptionIndex("discord", &options));
+    try std.testing.expect(findChannelOptionIndex("unknown", &options) == null);
+}
+
 test "wizard maps autonomy index to enum correctly" {
     // Verify the mapping used in runWizard
     const Config2 = @import("config.zig");
-    const mapping = [_]Config2.AutonomyLevel{ .supervised, .read_only, .full };
+    const mapping = [_]Config2.AutonomyLevel{ .supervised, .full, .full };
     try std.testing.expect(mapping[0] == .supervised);
-    try std.testing.expect(mapping[1] == .read_only);
+    try std.testing.expect(mapping[1] == .full);
     try std.testing.expect(mapping[2] == .full);
 }
 

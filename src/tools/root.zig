@@ -58,6 +58,7 @@ pub const http_request = @import("http_request.zig");
 pub const git = @import("git.zig");
 pub const memory_store = @import("memory_store.zig");
 pub const memory_recall = @import("memory_recall.zig");
+pub const memory_list = @import("memory_list.zig");
 pub const memory_forget = @import("memory_forget.zig");
 pub const schedule = @import("schedule.zig");
 pub const delegate = @import("delegate.zig");
@@ -330,6 +331,10 @@ pub fn allTools(
     mrt.* = .{};
     try list.append(allocator, mrt.tool());
 
+    const mlt = try allocator.create(memory_list.MemoryListTool);
+    mlt.* = .{};
+    try list.append(allocator, mlt.tool());
+
     const mft = try allocator.create(memory_forget.MemoryForgetTool);
     mft.* = .{};
     try list.append(allocator, mft.tool());
@@ -414,6 +419,9 @@ pub fn bindMemoryTools(tools: []const Tool, memory: ?Memory) void {
             mt.memory = memory;
         } else if (t.vtable == &memory_recall.MemoryRecallTool.vtable) {
             const mt: *memory_recall.MemoryRecallTool = @ptrCast(@alignCast(t.ptr));
+            mt.memory = memory;
+        } else if (t.vtable == &memory_list.MemoryListTool.vtable) {
+            const mt: *memory_list.MemoryListTool = @ptrCast(@alignCast(t.ptr));
             mt.memory = memory;
         } else if (t.vtable == &memory_forget.MemoryForgetTool.vtable) {
             const mt: *memory_forget.MemoryForgetTool = @ptrCast(@alignCast(t.ptr));
@@ -646,7 +654,7 @@ test "all tools includes extras when enabled" {
     defer {
         // Free all heap-allocated tool structs (mix of types)
         // Order: shell, file_read, file_write, file_edit, git, image_info,
-        //        memory_store, memory_recall, memory_forget, delegate, schedule,
+        //        memory_store, memory_recall, memory_list, memory_forget, delegate, schedule,
         //        http_request, browser
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
@@ -656,18 +664,19 @@ test "all tools includes extras when enabled" {
         std.testing.allocator.destroy(@as(*image.ImageInfoTool, @ptrCast(@alignCast(tools[5].ptr))));
         std.testing.allocator.destroy(@as(*memory_store.MemoryStoreTool, @ptrCast(@alignCast(tools[6].ptr))));
         std.testing.allocator.destroy(@as(*memory_recall.MemoryRecallTool, @ptrCast(@alignCast(tools[7].ptr))));
-        std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[8].ptr))));
-        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[9].ptr))));
-        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
-        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[11].ptr))));
-        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[12].ptr))));
-        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*memory_list.MemoryListTool, @ptrCast(@alignCast(tools[8].ptr))));
+        std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[9].ptr))));
+        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[10].ptr))));
+        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
+        std.testing.allocator.destroy(@as(*http_request.HttpRequestTool, @ptrCast(@alignCast(tools[13].ptr))));
+        std.testing.allocator.destroy(@as(*browser.BrowserTool, @ptrCast(@alignCast(tools[14].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
-    // + memory_store + memory_recall + memory_forget + delegate + schedule
-    // + spawn + http_request + browser = 14
-    try std.testing.expectEqual(@as(usize, 14), tools.len);
+    // + memory_store + memory_recall + memory_list + memory_forget
+    // + delegate + schedule + spawn + http_request + browser = 15
+    try std.testing.expectEqual(@as(usize, 15), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
@@ -675,7 +684,7 @@ test "all tools excludes extras when disabled" {
     defer {
         // Free all heap-allocated tool structs
         // Order: shell, file_read, file_write, file_edit, git, image_info,
-        //        memory_store, memory_recall, memory_forget, delegate, schedule
+        //        memory_store, memory_recall, memory_list, memory_forget, delegate, schedule, spawn
         std.testing.allocator.destroy(@as(*shell.ShellTool, @ptrCast(@alignCast(tools[0].ptr))));
         std.testing.allocator.destroy(@as(*file_read.FileReadTool, @ptrCast(@alignCast(tools[1].ptr))));
         std.testing.allocator.destroy(@as(*file_write.FileWriteTool, @ptrCast(@alignCast(tools[2].ptr))));
@@ -684,15 +693,16 @@ test "all tools excludes extras when disabled" {
         std.testing.allocator.destroy(@as(*image.ImageInfoTool, @ptrCast(@alignCast(tools[5].ptr))));
         std.testing.allocator.destroy(@as(*memory_store.MemoryStoreTool, @ptrCast(@alignCast(tools[6].ptr))));
         std.testing.allocator.destroy(@as(*memory_recall.MemoryRecallTool, @ptrCast(@alignCast(tools[7].ptr))));
-        std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[8].ptr))));
-        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[9].ptr))));
-        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[10].ptr))));
-        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*memory_list.MemoryListTool, @ptrCast(@alignCast(tools[8].ptr))));
+        std.testing.allocator.destroy(@as(*memory_forget.MemoryForgetTool, @ptrCast(@alignCast(tools[9].ptr))));
+        std.testing.allocator.destroy(@as(*delegate.DelegateTool, @ptrCast(@alignCast(tools[10].ptr))));
+        std.testing.allocator.destroy(@as(*schedule.ScheduleTool, @ptrCast(@alignCast(tools[11].ptr))));
+        std.testing.allocator.destroy(@as(*spawn.SpawnTool, @ptrCast(@alignCast(tools[12].ptr))));
         std.testing.allocator.free(tools);
     }
     // shell + file_read + file_write + file_edit + git + image_info
-    // + memory_store + memory_recall + memory_forget + delegate + schedule + spawn = 12
-    try std.testing.expectEqual(@as(usize, 12), tools.len);
+    // + memory_store + memory_recall + memory_list + memory_forget + delegate + schedule + spawn = 13
+    try std.testing.expectEqual(@as(usize, 13), tools.len);
 }
 
 test "bindMemoryTools matches by vtable, not by colliding tool name" {

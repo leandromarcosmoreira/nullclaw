@@ -631,6 +631,12 @@ pub fn initRuntime(
 
     const instance = desc.create(allocator, cfg) catch |err| {
         log.warn("memory backend '{s}' init failed: {}", .{ config.backend, err });
+        if (std.mem.eql(u8, config.backend, "sqlite") and err == error.MigrationFailed) {
+            const db_path = if (cfg.db_path) |p| std.mem.span(p) else "(unknown path)";
+            log.warn("sqlite migration failed for {s}", .{db_path});
+            log.warn("common causes: database locked/read-only, corrupt sqlite file, or sqlite build without FTS5", .{});
+            log.warn("hint: stop other nullclaw processes; if needed, back up/remove the db file and retry", .{});
+        }
         if (cfg.postgres_url) |pu| allocator.free(std.mem.span(pu));
         if (cfg.db_path) |p| allocator.free(std.mem.span(p));
         return null;

@@ -701,7 +701,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .integer) self.agent.compaction_max_source_chars = @intCast(v.integer);
             }
             if (ag.object.get("token_limit")) |v| {
-                if (v == .integer) self.agent.token_limit = @intCast(v.integer);
+                if (v == .integer and v.integer >= 0) {
+                    self.agent.token_limit = @intCast(v.integer);
+                    self.agent.token_limit_explicit = true;
+                }
             }
             if (ag.object.get("message_timeout_secs")) |v| {
                 if (v == .integer) self.agent.message_timeout_secs = @intCast(v.integer);

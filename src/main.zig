@@ -28,6 +28,7 @@ const Command = enum {
     hardware,
     migrate,
     memory,
+    capabilities,
     models,
     auth,
     update,
@@ -51,6 +52,7 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "hardware", .hardware },
         .{ "migrate", .migrate },
         .{ "memory", .memory },
+        .{ "capabilities", .capabilities },
         .{ "models", .models },
         .{ "auth", .auth },
         .{ "update", .update },
@@ -100,6 +102,7 @@ pub fn main() !void {
         .hardware => try runHardware(allocator, sub_args),
         .migrate => try runMigrate(allocator, sub_args),
         .memory => try runMemory(allocator, sub_args),
+        .capabilities => try runCapabilities(allocator, sub_args),
         .models => try runModels(allocator, sub_args),
         .auth => try runAuth(allocator, sub_args),
         .update => try runUpdate(allocator, sub_args),
@@ -875,6 +878,30 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     std.process.exit(1);
 }
 
+fn runCapabilities(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    var as_json = false;
+    if (sub_args.len > 0) {
+        if (sub_args.len == 1 and (std.mem.eql(u8, sub_args[0], "--json") or std.mem.eql(u8, sub_args[0], "json"))) {
+            as_json = true;
+        } else {
+            std.debug.print("Usage: nullclaw capabilities [--json]\n", .{});
+            std.process.exit(1);
+        }
+    }
+
+    var cfg_opt: ?yc.config.Config = yc.config.Config.load(allocator) catch null;
+    defer if (cfg_opt) |*cfg| cfg.deinit();
+    const cfg_ptr: ?*const yc.config.Config = if (cfg_opt) |*cfg| cfg else null;
+
+    const output = if (as_json)
+        try yc.capabilities.buildManifestJson(allocator, cfg_ptr, null)
+    else
+        try yc.capabilities.buildSummaryText(allocator, cfg_ptr, null);
+    defer allocator.free(output);
+
+    std.debug.print("{s}", .{output});
+}
+
 // ── Models ───────────────────────────────────────────────────────
 
 fn runModels(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
@@ -1567,9 +1594,10 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
             const reply = session_mgr.processMessage(session_key, msg.content) catch |err| {
                 std.debug.print("  Agent error: {}\n", .{err});
                 const err_msg = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
                     error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
+                    error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
@@ -1874,9 +1902,10 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
             const reply = session_mgr.processMessage(session_key, msg.content) catch |err| {
                 std.debug.print("  Agent error: {}\n", .{err});
                 const err_msg = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
                     error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
+                    error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
@@ -2269,6 +2298,7 @@ fn printUsage() void {
         \\  hardware    Discover and manage hardware
         \\  migrate     Migrate data from other agent runtimes
         \\  memory      Inspect and maintain memory subsystem
+        \\  capabilities Show runtime capabilities manifest
         \\  models      Manage provider model catalogs
         \\  auth        Manage OAuth authentication (OpenAI Codex)
         \\  update      Check for and install updates
@@ -2286,6 +2316,7 @@ fn printUsage() void {
         \\  hardware <discover|introspect|info> [ARGS]
         \\  migrate openclaw [--dry-run] [--source PATH]
         \\  memory <stats|count|reindex|search|get|list|drain-outbox|forget> [ARGS]
+        \\  capabilities [--json]
         \\  models refresh
         \\  auth <login|status|logout> <provider> [--import-codex]
         \\  update [--check] [--yes]
@@ -2303,6 +2334,7 @@ test "parse known commands" {
     try std.testing.expectEqual(.service, parseCommand("service").?);
     try std.testing.expectEqual(.migrate, parseCommand("migrate").?);
     try std.testing.expectEqual(.memory, parseCommand("memory").?);
+    try std.testing.expectEqual(.capabilities, parseCommand("capabilities").?);
     try std.testing.expectEqual(.models, parseCommand("models").?);
     try std.testing.expectEqual(.auth, parseCommand("auth").?);
     try std.testing.expectEqual(.update, parseCommand("update").?);

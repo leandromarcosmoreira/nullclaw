@@ -246,9 +246,10 @@ pub fn runTelegramLoop(
             const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
                 log.err("Agent error: {}", .{err});
                 const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.",
                     error.NoResponseContent => "Model returned an empty response. Please retry or /new for a fresh session.",
+                    error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
@@ -365,9 +366,10 @@ pub fn runSignalLoop(
             const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
                 log.err("Signal agent error: {}", .{err});
                 const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
                     error.NoResponseContent => "Model returned an empty response. Please try again.",
+                    error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again.",
                 };
@@ -565,9 +567,10 @@ pub fn runMatrixLoop(
             const reply = runtime.session_mgr.processMessage(session_key, msg.content) catch |err| {
                 log.err("Matrix agent error: {}", .{err});
                 const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",
                     error.ProviderDoesNotSupportVision => "The current provider does not support image input.",
                     error.NoResponseContent => "Model returned an empty response. Please try again.",
+                    error.AllProvidersFailed => "All configured providers failed for this request. Check model/provider compatibility and credentials.",
                     error.OutOfMemory => "Out of memory.",
                     else => "An error occurred. Try again.",
                 };
