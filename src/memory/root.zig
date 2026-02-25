@@ -10,6 +10,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const config_types = @import("../config_types.zig");
+const provider_api_key = @import("../providers/api_key.zig");
 const log = std.log.scoped(.memory);
 
 // engines/ (Layer A: Primary Store)
@@ -414,6 +415,14 @@ pub const MemoryRuntime = struct {
     /// Embeds the content and upserts into the vector store.
     /// Errors are caught and logged, never propagated.
     pub fn syncVectorAfterStore(self: *MemoryRuntime, allocator: std.mem.Allocator, key: []const u8, content: []const u8) void {
+        // Durable mode: enqueue and return (drain happens at turn boundaries / shutdown).
+        if (self._outbox) |ob| {
+            ob.enqueue(key, "upsert") catch |err| {
+                log.warn("outbox enqueue failed for key '{s}': {}", .{ key, err });
+            };
+            return;
+        }
+
         const provider = self._embedding_provider orelse return;
         const vs = self._vector_store orelse return;
 
@@ -449,6 +458,13 @@ pub const MemoryRuntime = struct {
     /// Best-effort delete from vector store after a forget() call.
     /// Errors are caught and logged, never propagated.
     pub fn deleteFromVectorStore(self: *MemoryRuntime, key: []const u8) void {
+        if (self._outbox) |ob| {
+            ob.enqueue(key, "delete") catch |err| {
+                log.warn("outbox enqueue failed for key '{s}': {}", .{ key, err });
+            };
+            return;
+        }
+
         const vs = self._vector_store orelse return;
         vs.delete(key) catch |err| {
             log.warn("vector store delete failed for key '{s}': {}", .{ key, err });
@@ -676,12 +692,16 @@ pub fn initRuntime(
     var outbox_inst: ?*outbox.VectorOutbox = null;
     var sidecar_db_path: ?[*:0]const u8 = null;
     var resolved_vector_mode: []const u8 = "none";
+    var resolved_vector_sync_mode: []const u8 = "best_effort";
     if (config.search.enabled and !std.mem.eql(u8, config.search.provider, "none") and config.search.query.hybrid.enabled) vec_plane: {
+        const primary_api_key = provider_api_key.resolveApiKey(allocator, config.search.provider, null) catch null;
+        defer if (primary_api_key) |k| allocator.free(k);
+
         // 1. Create EmbeddingProvider (with optional fallback via ProviderRouter)
         const primary_ep = embeddings.createEmbeddingProvider(
             allocator,
             config.search.provider,
-            null,
+            primary_api_key,
             config.search.model,
             config.search.dimensions,
         ) catch break :vec_plane;
@@ -692,10 +712,13 @@ pub fn initRuntime(
         if (!std.mem.eql(u8, config.search.fallback_provider, "none") and
             config.search.fallback_provider.len > 0)
         wrap_router: {
+            const fallback_api_key = provider_api_key.resolveApiKey(allocator, config.search.fallback_provider, null) catch null;
+            defer if (fallback_api_key) |k| allocator.free(k);
+
             const fallback_ep = embeddings.createEmbeddingProvider(
                 allocator,
                 config.search.fallback_provider,
-                null,
+                fallback_api_key,
                 config.search.model,
                 config.search.dimensions,
             ) catch {
@@ -832,6 +855,7 @@ pub fn initRuntime(
                     break :vec_plane;
                 };
                 outbox_inst = ob;
+                resolved_vector_sync_mode = "durable_outbox";
             }
         }
 
@@ -843,9 +867,21 @@ pub fn initRuntime(
 
     // Enforce fallback_policy: if fail_fast and vector plane was expected but failed, abort.
     if (std.mem.eql(u8, config.reliability.fallback_policy, "fail_fast")) {
-        if (config.search.enabled and !std.mem.eql(u8, config.search.provider, "none") and config.search.query.hybrid.enabled and vs_iface == null) {
-            log.warn("fallback_policy=fail_fast: vector plane init failed, aborting runtime creation", .{});
+        const vector_expected = config.search.enabled and
+            !std.mem.eql(u8, config.search.provider, "none") and
+            config.search.query.hybrid.enabled;
+        const durable_requested = !std.mem.eql(u8, config.search.sync.mode, "best_effort");
+        const vector_plane_failed = vector_expected and vs_iface == null;
+        const durable_outbox_unavailable = vector_expected and durable_requested and outbox_inst == null;
+        if (vector_plane_failed or durable_outbox_unavailable) {
+            if (vector_plane_failed) {
+                log.warn("fallback_policy=fail_fast: vector plane init failed, aborting runtime creation", .{});
+            } else {
+                log.warn("fallback_policy=fail_fast: durable vector sync unavailable, aborting runtime creation", .{});
+            }
             // Clean up partially-created P3 resources
+            if (outbox_inst) |ob| ob.deinit();
+            if (vs_iface) |vs| vs.deinitStore();
             if (embed_provider) |ep| ep.deinit();
             if (cb_inst) |cb| allocator.destroy(cb);
             if (sidecar_db_path) |p| allocator.free(std.mem.span(p));
@@ -936,7 +972,7 @@ pub fn initRuntime(
             .vector_mode = vector_mode,
             .embedding_provider = embed_name,
             .rollout_mode = config.reliability.rollout_mode,
-            .vector_sync_mode = config.search.sync.mode,
+            .vector_sync_mode = resolved_vector_sync_mode,
             .hygiene_enabled = config.lifecycle.hygiene_enabled,
             .snapshot_enabled = config.lifecycle.snapshot_enabled,
             .cache_enabled = config.response_cache.enabled,
@@ -1379,6 +1415,90 @@ test "initRuntime durable_outbox uses max of embed/vector retry config" {
 
     const ob = rt._outbox orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 5), ob.max_retries);
+    try std.testing.expectEqualStrings("durable_outbox", rt.resolved.vector_sync_mode);
+}
+
+test "initRuntime resolves best_effort vector sync when outbox backend unavailable" {
+    var rt = initRuntime(std.testing.allocator, &.{
+        .backend = "none",
+        .search = .{
+            .provider = "openai",
+            .query = .{ .hybrid = .{ .enabled = true } },
+            .store = .{
+                .kind = "qdrant",
+                .qdrant_url = "http://127.0.0.1:6333",
+            },
+            .sync = .{
+                .mode = "durable_outbox",
+            },
+        },
+    }, "/tmp") orelse return error.TestUnexpectedResult;
+    defer rt.deinit();
+
+    try std.testing.expect(rt._vector_store != null);
+    try std.testing.expect(rt._outbox == null);
+    try std.testing.expectEqualStrings("best_effort", rt.resolved.vector_sync_mode);
+}
+
+test "initRuntime fail_fast returns null when durable outbox is unavailable" {
+    const rt = initRuntime(std.testing.allocator, &.{
+        .backend = "none",
+        .search = .{
+            .provider = "openai",
+            .query = .{ .hybrid = .{ .enabled = true } },
+            .store = .{
+                .kind = "qdrant",
+                .qdrant_url = "http://127.0.0.1:6333",
+            },
+            .sync = .{
+                .mode = "durable_outbox",
+            },
+        },
+        .reliability = .{
+            .fallback_policy = "fail_fast",
+        },
+    }, "/tmp");
+    try std.testing.expect(rt == null);
+}
+
+test "syncVectorAfterStore enqueues when durable outbox is active" {
+    var rt = initRuntime(std.testing.allocator, &.{
+        .backend = "sqlite",
+        .search = .{
+            .provider = "openai",
+            .query = .{ .hybrid = .{ .enabled = true } },
+            .sync = .{
+                .mode = "durable_outbox",
+            },
+        },
+    }, "/tmp") orelse return error.TestUnexpectedResult;
+    defer rt.deinit();
+
+    const ob = rt._outbox orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), try ob.pendingCount());
+
+    rt.syncVectorAfterStore(std.testing.allocator, "k1", "content");
+    try std.testing.expectEqual(@as(usize, 1), try ob.pendingCount());
+}
+
+test "deleteFromVectorStore enqueues delete when durable outbox is active" {
+    var rt = initRuntime(std.testing.allocator, &.{
+        .backend = "sqlite",
+        .search = .{
+            .provider = "openai",
+            .query = .{ .hybrid = .{ .enabled = true } },
+            .sync = .{
+                .mode = "durable_outbox",
+            },
+        },
+    }, "/tmp") orelse return error.TestUnexpectedResult;
+    defer rt.deinit();
+
+    const ob = rt._outbox orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), try ob.pendingCount());
+
+    rt.deleteFromVectorStore("k1");
+    try std.testing.expectEqual(@as(usize, 1), try ob.pendingCount());
 }
 
 test "MemoryRuntime.syncVectorAfterStore with no provider is no-op" {

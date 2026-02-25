@@ -588,11 +588,12 @@ pub const Agent = struct {
                 const save_key = std.fmt.allocPrint(self.allocator, "autosave_user_{d}", .{ts}) catch null;
                 if (save_key) |key| {
                     defer self.allocator.free(key);
-                    mem.store(key, user_message, .conversation, self.memory_session_id) catch {};
-                    // Vector sync after auto-save
-                    if (self.mem_rt) |rt| {
-                        rt.syncVectorAfterStore(self.allocator, key, user_message);
-                    }
+                    if (mem.store(key, user_message, .conversation, self.memory_session_id)) |_| {
+                        // Vector sync after auto-save
+                        if (self.mem_rt) |rt| {
+                            rt.syncVectorAfterStore(self.allocator, key, user_message);
+                        }
+                    } else |_| {}
                 }
             }
         }
@@ -893,11 +894,12 @@ pub const Agent = struct {
                         const save_key = std.fmt.allocPrint(self.allocator, "autosave_assistant_{d}", .{ts}) catch null;
                         if (save_key) |key| {
                             defer self.allocator.free(key);
-                            mem.store(key, summary, .conversation, self.memory_session_id) catch {};
-                            // Vector sync after auto-save
-                            if (self.mem_rt) |rt| {
-                                rt.syncVectorAfterStore(self.allocator, key, summary);
-                            }
+                            if (mem.store(key, summary, .conversation, self.memory_session_id)) |_| {
+                                // Vector sync after auto-save
+                                if (self.mem_rt) |rt| {
+                                    rt.syncVectorAfterStore(self.allocator, key, summary);
+                                }
+                            } else |_| {}
                         }
                     }
                 }
