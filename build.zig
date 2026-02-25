@@ -384,8 +384,9 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    // macOS: strip local symbols post-install (Zig strip only removes debug info)
-    if (optimize != .Debug and builtin.os.tag == .macos) {
+    // macOS host+target only: strip local symbols post-install.
+    // Host `strip` cannot process ELF/PE during cross-builds.
+    if (optimize != .Debug and builtin.os.tag == .macos and target.result.os.tag == .macos) {
         const strip_cmd = b.addSystemCommand(&.{"strip"});
         strip_cmd.addArgs(&.{"-x"});
         strip_cmd.addFileArg(exe.getEmittedBin());

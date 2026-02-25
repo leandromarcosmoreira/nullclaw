@@ -40,6 +40,23 @@ fn isInternalMemoryKey(key: []const u8) bool {
         std.mem.eql(u8, key, "last_hygiene_at");
 }
 
+fn extractMarkdownMemoryKey(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, " \t");
+    if (!std.mem.startsWith(u8, trimmed, "**")) return null;
+    const rest = trimmed[2..];
+    const suffix = std.mem.indexOf(u8, rest, "**:") orelse return null;
+    if (suffix == 0) return null;
+    return rest[0..suffix];
+}
+
+fn isInternalMemoryEntry(entry: MemoryEntry) bool {
+    if (isInternalMemoryKey(entry.key)) return true;
+    if (extractMarkdownMemoryKey(entry.content)) |extracted| {
+        if (isInternalMemoryKey(extracted)) return true;
+    }
+    return false;
+}
+
 fn sanitizeMemoryText(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     // Strip inline image markers from recalled snippets so stale
     // [IMAGE:...] references do not accidentally trigger multimodal mode.
@@ -85,7 +102,7 @@ pub fn loadContext(
     var wrote_header = false;
 
     for (scoped_entries) |entry| {
-        if (isInternalMemoryKey(entry.key)) continue;
+        if (isInternalMemoryEntry(entry)) continue;
         if (!wrote_header) {
             try w.writeAll("[Memory context]\n");
             wrote_header = true;
@@ -104,7 +121,7 @@ pub fn loadContext(
             for (entries) |entry| {
                 if (entry.session_id != null) continue; // keep scoped isolation (no cross-session bleed)
                 if (containsKey(scoped_entries, entry.key)) continue;
-                if (isInternalMemoryKey(entry.key)) continue;
+                if (isInternalMemoryEntry(entry)) continue;
 
                 if (!wrote_header) {
                     try w.writeAll("[Memory context]\n");
@@ -150,6 +167,9 @@ pub fn loadContextWithRuntime(
 
     for (candidates) |cand| {
         if (isInternalMemoryKey(cand.key)) continue;
+        if (extractMarkdownMemoryKey(cand.snippet)) |extracted| {
+            if (isInternalMemoryKey(extracted)) continue;
+        }
         if (!wrote_header) {
             try w.writeAll("[Memory context]\n");
             wrote_header = true;
@@ -333,6 +353,24 @@ test "loadContext filters internal autosave and hygiene entries" {
     try std.testing.expect(std.mem.indexOf(u8, context, "autosave_user_") == null);
     try std.testing.expect(std.mem.indexOf(u8, context, "autosave_assistant_") == null);
     try std.testing.expect(std.mem.indexOf(u8, context, "last_hygiene_at") == null);
+}
+
+test "loadContext filters markdown-encoded internal entries" {
+    const allocator = std.testing.allocator;
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(allocator, ":memory:");
+    defer sqlite_mem.deinit();
+    const mem = sqlite_mem.memory();
+
+    // Markdown backend serializes memory as "**key**: value".
+    try mem.store("MEMORY:3", "**last_hygiene_at**: 1772051598", .core, null);
+    try mem.store("MEMORY:4", "**Name**: User", .core, null);
+
+    const context = try loadContext(allocator, mem, "User", null);
+    defer allocator.free(context);
+
+    try std.testing.expect(std.mem.indexOf(u8, context, "last_hygiene_at") == null);
+    try std.testing.expect(std.mem.indexOf(u8, context, "**Name**: User") != null);
 }
 
 test "loadContextWithRuntime returns empty when only internal entries match" {

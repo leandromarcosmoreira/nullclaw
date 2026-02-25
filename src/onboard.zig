@@ -618,6 +618,7 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
     var input_buf: [512]u8 = undefined;
+    resetStdinLineReader();
 
     var cfg = Config.load(allocator) catch {
         try stdout.writeAll("No existing config found. Run `nullclaw onboard` first.\n");
@@ -646,13 +647,66 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
     try stdout.flush();
 }
 
+const StdinLineReader = struct {
+    pending: [8192]u8 = undefined,
+    pending_len: usize = 0,
+
+    fn reset(self: *StdinLineReader) void {
+        self.pending_len = 0;
+    }
+
+    fn copyLineToOut(out: []u8, raw_line: []const u8) []const u8 {
+        const trimmed = std.mem.trimRight(u8, raw_line, "\r");
+        const copy_len = @min(out.len, trimmed.len);
+        @memcpy(out[0..copy_len], trimmed[0..copy_len]);
+        return out[0..copy_len];
+    }
+
+    fn popLine(self: *StdinLineReader, out: []u8) ?[]const u8 {
+        const nl = std.mem.indexOfScalar(u8, self.pending[0..self.pending_len], '\n') orelse return null;
+        const line = copyLineToOut(out, self.pending[0..nl]);
+
+        const remainder_start = nl + 1;
+        const remainder_len = self.pending_len - remainder_start;
+        std.mem.copyForwards(u8, self.pending[0..remainder_len], self.pending[remainder_start..self.pending_len]);
+        self.pending_len = remainder_len;
+        return line;
+    }
+
+    fn flushRemainder(self: *StdinLineReader, out: []u8) ?[]const u8 {
+        if (self.pending_len == 0) return null;
+        const line = copyLineToOut(out, self.pending[0..self.pending_len]);
+        self.pending_len = 0;
+        return line;
+    }
+};
+
+var stdin_line_reader = StdinLineReader{};
+
+fn resetStdinLineReader() void {
+    stdin_line_reader.reset();
+}
+
 /// Read a line from stdin, trimming trailing newline/carriage return.
 /// Returns null on EOF (Ctrl+D).
 fn readLine(buf: []u8) ?[]const u8 {
     const stdin = std.fs.File.stdin();
-    const n = stdin.read(buf) catch return null;
-    if (n == 0) return null;
-    return std.mem.trimRight(u8, buf[0..n], "\r\n");
+    while (true) {
+        if (stdin_line_reader.popLine(buf)) |line| return line;
+
+        if (stdin_line_reader.pending_len == stdin_line_reader.pending.len) {
+            // No newline yet and internal buffer is full; return a truncated line
+            // to prevent deadlock on oversized input.
+            return stdin_line_reader.flushRemainder(buf);
+        }
+
+        const read_dst = stdin_line_reader.pending[stdin_line_reader.pending_len..];
+        const n = stdin.read(read_dst) catch return null;
+        if (n == 0) {
+            return stdin_line_reader.flushRemainder(buf);
+        }
+        stdin_line_reader.pending_len += n;
+    }
 }
 
 /// Prompt user with a message, read a line. Returns default_val if input is empty.
@@ -872,8 +926,9 @@ fn parseTelegramAllowFrom(allocator: std.mem.Allocator, raw: []const u8) ![]cons
 }
 
 fn configureTelegramChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    var token_buf: [512]u8 = undefined;
     try out.print("{s}  Telegram bot token (required, Enter to skip): ", .{prefix});
-    const token = prompt(out, input_buf, "", "") orelse return false;
+    const token = prompt(out, &token_buf, "", "") orelse return false;
     if (token.len == 0) {
         try out.print("{s}  -> Telegram skipped\n", .{prefix});
         return false;
@@ -899,8 +954,9 @@ fn configureTelegramChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, 
 }
 
 fn configureDiscordChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    var token_buf: [512]u8 = undefined;
     try out.print("{s}  Discord bot token (required, Enter to skip): ", .{prefix});
-    const token = prompt(out, input_buf, "", "") orelse return false;
+    const token = prompt(out, &token_buf, "", "") orelse return false;
     if (token.len == 0) {
         try out.print("{s}  -> Discord skipped\n", .{prefix});
         return false;
@@ -921,15 +977,17 @@ fn configureDiscordChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, p
 }
 
 fn configureSlackChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    var bot_token_buf: [512]u8 = undefined;
+    var app_token_buf: [512]u8 = undefined;
     try out.print("{s}  Slack bot token (required, Enter to skip): ", .{prefix});
-    const bot_token = prompt(out, input_buf, "", "") orelse return false;
+    const bot_token = prompt(out, &bot_token_buf, "", "") orelse return false;
     if (bot_token.len == 0) {
         try out.print("{s}  -> Slack skipped\n", .{prefix});
         return false;
     }
 
     try out.print("{s}  Slack app token (optional, for socket mode): ", .{prefix});
-    const app_token = prompt(out, input_buf, "", "") orelse return false;
+    const app_token = prompt(out, &app_token_buf, "", "") orelse return false;
 
     var signing_secret: ?[]const u8 = null;
     if (app_token.len == 0) {
@@ -952,8 +1010,9 @@ fn configureSlackChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, pre
 }
 
 fn configureMattermostChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    var base_url_buf: [512]u8 = undefined;
     try out.print("{s}  Mattermost base URL (required, Enter to skip): ", .{prefix});
-    const base_url = prompt(out, input_buf, "", "") orelse return false;
+    const base_url = prompt(out, &base_url_buf, "", "") orelse return false;
     if (base_url.len == 0) {
         try out.print("{s}  -> Mattermost skipped\n", .{prefix});
         return false;
@@ -977,30 +1036,34 @@ fn configureMattermostChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8
     return true;
 }
 
-fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, _: []u8, prefix: []const u8) !bool {
+    var homeserver_buf: [512]u8 = undefined;
+    var access_token_buf: [512]u8 = undefined;
+    var room_id_buf: [512]u8 = undefined;
+    var user_id_buf: [512]u8 = undefined;
     try out.print("{s}  Matrix homeserver URL (required, Enter to skip): ", .{prefix});
-    const homeserver = prompt(out, input_buf, "", "") orelse return false;
+    const homeserver = prompt(out, &homeserver_buf, "", "") orelse return false;
     if (homeserver.len == 0) {
         try out.print("{s}  -> Matrix skipped\n", .{prefix});
         return false;
     }
 
     try out.print("{s}  Matrix access token (required, Enter to skip): ", .{prefix});
-    const access_token = prompt(out, input_buf, "", "") orelse return false;
+    const access_token = prompt(out, &access_token_buf, "", "") orelse return false;
     if (access_token.len == 0) {
         try out.print("{s}  -> Matrix skipped\n", .{prefix});
         return false;
     }
 
     try out.print("{s}  Matrix room ID (required, Enter to skip): ", .{prefix});
-    const room_id = prompt(out, input_buf, "", "") orelse return false;
+    const room_id = prompt(out, &room_id_buf, "", "") orelse return false;
     if (room_id.len == 0) {
         try out.print("{s}  -> Matrix skipped\n", .{prefix});
         return false;
     }
 
     try out.print("{s}  Matrix user ID (optional, for typing indicators): ", .{prefix});
-    const user_id = prompt(out, input_buf, "", "") orelse return false;
+    const user_id = prompt(out, &user_id_buf, "", "") orelse return false;
 
     const accounts = try cfg.allocator.alloc(config_mod.MatrixConfig, 1);
     accounts[0] = .{
@@ -1017,15 +1080,17 @@ fn configureMatrixChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, pr
 }
 
 fn configureSignalChannel(cfg: *Config, out: *std.Io.Writer, input_buf: []u8, prefix: []const u8) !bool {
+    var http_url_buf: [512]u8 = undefined;
+    var account_buf: [512]u8 = undefined;
     try out.print("{s}  Signal daemon URL [http://127.0.0.1:8080]: ", .{prefix});
-    const http_url = prompt(out, input_buf, "", "http://127.0.0.1:8080") orelse return false;
+    const http_url = prompt(out, &http_url_buf, "", "http://127.0.0.1:8080") orelse return false;
     if (http_url.len == 0) {
         try out.print("{s}  -> Signal skipped\n", .{prefix});
         return false;
     }
 
     try out.print("{s}  Signal account (E.164, required, Enter to skip): ", .{prefix});
-    const account = prompt(out, input_buf, "", "") orelse return false;
+    const account = prompt(out, &account_buf, "", "") orelse return false;
     if (account.len == 0) {
         try out.print("{s}  -> Signal skipped\n", .{prefix});
         return false;
@@ -1068,6 +1133,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const out = &bw.interface;
+    resetStdinLineReader();
     try out.writeAll(BANNER);
     try out.writeAll("  Welcome to nullclaw -- the fastest, smallest AI assistant.\n");
     try out.writeAll("  This wizard will configure your agent.\n\n");
@@ -1673,10 +1739,19 @@ test "known_providers has entries" {
     try std.testing.expectEqualStrings("openrouter", known_providers[0].key);
 }
 
-test "selectableBackends returns non-empty" {
+test "selectableBackends returns enabled backends" {
     const backends = selectableBackends();
-    try std.testing.expect(backends.len >= 3);
-    try std.testing.expectEqualStrings("markdown", backends[0].name);
+    try std.testing.expect(backends.len > 0);
+
+    for (backends) |desc| {
+        try std.testing.expect(memory_root.findBackend(desc.name) != null);
+    }
+
+    if (memory_root.findBackend("markdown") != null) {
+        try std.testing.expectEqualStrings("markdown", backends[0].name);
+    } else if (memory_root.findBackend("none") != null) {
+        try std.testing.expectEqualStrings("none", backends[0].name);
+    }
 }
 
 test "selectableBackendsForWizard prioritizes sqlite and keeps api last" {
@@ -1730,6 +1805,43 @@ test "parseTelegramAllowFrom normalizes, deduplicates and strips @" {
     try std.testing.expectEqualStrings("Alice", allow[0]);
     try std.testing.expectEqualStrings("12345", allow[1]);
     try std.testing.expectEqualStrings("bob", allow[2]);
+}
+
+test "StdinLineReader popLine handles chunked multi-line input" {
+    var reader = StdinLineReader{};
+    var out: [64]u8 = undefined;
+
+    const chunk1 = "first\nsecond";
+    @memcpy(reader.pending[0..chunk1.len], chunk1);
+    reader.pending_len = chunk1.len;
+
+    const line1 = reader.popLine(&out) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("first", line1);
+    try std.testing.expect(reader.popLine(&out) == null);
+
+    const chunk2 = "\nthird\r\n";
+    @memcpy(reader.pending[reader.pending_len .. reader.pending_len + chunk2.len], chunk2);
+    reader.pending_len += chunk2.len;
+
+    const line2 = reader.popLine(&out) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("second", line2);
+    const line3 = reader.popLine(&out) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("third", line3);
+    try std.testing.expect(reader.popLine(&out) == null);
+}
+
+test "StdinLineReader flushRemainder returns final unterminated line" {
+    var reader = StdinLineReader{};
+    var out: [32]u8 = undefined;
+
+    const tail = "last-line\r";
+    @memcpy(reader.pending[0..tail.len], tail);
+    reader.pending_len = tail.len;
+
+    const line = reader.flushRemainder(&out) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("last-line", line);
+    try std.testing.expectEqual(@as(usize, 0), reader.pending_len);
+    try std.testing.expect(reader.flushRemainder(&out) == null);
 }
 
 test "BANNER contains descriptive text" {

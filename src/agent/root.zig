@@ -2144,6 +2144,20 @@ test "slash /model with colon switches model" {
     try std.testing.expectEqual(@as(u32, 8192), agent.max_tokens);
 }
 
+test "slash /model with telegram bot mention switches model" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+    agent.max_tokens = 111;
+
+    const response = (try agent.handleSlashCommand("/model@nullclaw_bot qianfan/custom-model")).?;
+    defer allocator.free(response);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "qianfan/custom-model") != null);
+    try std.testing.expectEqualStrings("qianfan/custom-model", agent.model_name);
+    try std.testing.expectEqual(@as(u32, 32_768), agent.max_tokens);
+}
+
 test "slash /model resolves provider max_tokens fallback" {
     const allocator = std.testing.allocator;
     var agent = try makeTestAgent(allocator);
@@ -2207,6 +2221,111 @@ test "slash /model list aliases to model status" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "Current model: test-model") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "Switch: /model <name>") != null);
+}
+
+test "slash /memory list hides internal autosave and hygiene entries by default" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(allocator, ":memory:");
+    defer sqlite_mem.deinit();
+    const mem = sqlite_mem.memory();
+
+    try mem.store("autosave_user_1", "hello", .conversation, null);
+    try mem.store("last_hygiene_at", "1772051598", .core, null);
+    try mem.store("MEMORY:99", "**last_hygiene_at**: 1772051691", .core, null);
+    try mem.store("user_language", "ru", .core, null);
+
+    const resolved = memory_mod.ResolvedConfig{
+        .primary_backend = "test",
+        .retrieval_mode = "keyword",
+        .vector_mode = "none",
+        .embedding_provider = "none",
+        .rollout_mode = "off",
+        .vector_sync_mode = "best_effort",
+        .hygiene_enabled = false,
+        .snapshot_enabled = false,
+        .cache_enabled = false,
+        .semantic_cache_enabled = false,
+        .summarizer_enabled = false,
+        .source_count = 0,
+        .fallback_policy = "degrade",
+    };
+    var rt = memory_mod.MemoryRuntime{
+        .memory = mem,
+        .session_store = null,
+        .response_cache = null,
+        .capabilities = .{
+            .supports_keyword_rank = false,
+            .supports_session_store = false,
+            .supports_transactions = false,
+            .supports_outbox = false,
+        },
+        .resolved = resolved,
+        ._db_path = null,
+        ._cache_db_path = null,
+        ._engine = null,
+        ._allocator = allocator,
+    };
+    agent.mem_rt = &rt;
+
+    const response = (try agent.handleSlashCommand("/memory list --limit 10")).?;
+    defer allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "user_language") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "autosave_user_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "last_hygiene_at") == null);
+}
+
+test "slash /memory list includes internal entries when requested" {
+    const allocator = std.testing.allocator;
+    var agent = try makeTestAgent(allocator);
+    defer agent.deinit();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(allocator, ":memory:");
+    defer sqlite_mem.deinit();
+    const mem = sqlite_mem.memory();
+
+    try mem.store("autosave_user_1", "hello", .conversation, null);
+    try mem.store("last_hygiene_at", "1772051598", .core, null);
+
+    const resolved = memory_mod.ResolvedConfig{
+        .primary_backend = "test",
+        .retrieval_mode = "keyword",
+        .vector_mode = "none",
+        .embedding_provider = "none",
+        .rollout_mode = "off",
+        .vector_sync_mode = "best_effort",
+        .hygiene_enabled = false,
+        .snapshot_enabled = false,
+        .cache_enabled = false,
+        .semantic_cache_enabled = false,
+        .summarizer_enabled = false,
+        .source_count = 0,
+        .fallback_policy = "degrade",
+    };
+    var rt = memory_mod.MemoryRuntime{
+        .memory = mem,
+        .session_store = null,
+        .response_cache = null,
+        .capabilities = .{
+            .supports_keyword_rank = false,
+            .supports_session_store = false,
+            .supports_transactions = false,
+            .supports_outbox = false,
+        },
+        .resolved = resolved,
+        ._db_path = null,
+        ._cache_db_path = null,
+        ._engine = null,
+        ._allocator = allocator,
+    };
+    agent.mem_rt = &rt;
+
+    const response = (try agent.handleSlashCommand("/memory list --limit 10 --include-internal")).?;
+    defer allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "autosave_user_1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "last_hygiene_at") != null);
 }
 
 test "slash /model shows provider and model fallback chains" {

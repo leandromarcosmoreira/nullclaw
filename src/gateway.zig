@@ -2843,6 +2843,10 @@ test "selectTelegramConfig picks account by query account_id" {
     };
 
     const selected = selectTelegramConfig(&cfg, "/telegram?account_id=backup");
+    if (!build_options.enable_channel_telegram) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("backup", selected.?.account_id);
 }
@@ -2868,6 +2872,10 @@ test "selectTelegramConfig falls back to preferred primary account" {
     };
 
     const selected = selectTelegramConfig(&cfg, "/telegram");
+    if (!build_options.enable_channel_telegram) {
+        try std.testing.expect(selected == null);
+        return;
+    }
     try std.testing.expect(selected != null);
     try std.testing.expectEqualStrings("default", selected.?.account_id);
 }

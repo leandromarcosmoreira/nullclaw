@@ -56,7 +56,7 @@ pub const MemoryListTool = struct {
 
         var filtered_total: usize = 0;
         for (entries) |entry| {
-            if (!include_internal and isInternalMemoryKey(entry.key)) continue;
+            if (!include_internal and isInternalEntry(entry)) continue;
             filtered_total += 1;
         }
 
@@ -76,7 +76,7 @@ pub const MemoryListTool = struct {
 
         var written: usize = 0;
         for (entries) |entry| {
-            if (!include_internal and isInternalMemoryKey(entry.key)) continue;
+            if (!include_internal and isInternalEntry(entry)) continue;
             if (written >= shown) break;
             try w.print("  {d}. {s} [{s}] {s}\n", .{ written + 1, entry.key, entry.category.toString(), entry.timestamp });
             if (include_content) {
@@ -93,6 +93,23 @@ pub const MemoryListTool = struct {
         return std.mem.startsWith(u8, key, "autosave_user_") or
             std.mem.startsWith(u8, key, "autosave_assistant_") or
             std.mem.eql(u8, key, "last_hygiene_at");
+    }
+
+    fn extractMarkdownMemoryKey(content: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, content, " \t");
+        if (!std.mem.startsWith(u8, trimmed, "**")) return null;
+        const rest = trimmed[2..];
+        const suffix = std.mem.indexOf(u8, rest, "**:") orelse return null;
+        if (suffix == 0) return null;
+        return rest[0..suffix];
+    }
+
+    fn isInternalEntry(entry: MemoryEntry) bool {
+        if (isInternalMemoryKey(entry.key)) return true;
+        if (extractMarkdownMemoryKey(entry.content)) |extracted| {
+            if (isInternalMemoryKey(extracted)) return true;
+        }
+        return false;
     }
 
     fn truncateUtf8(s: []const u8, max_len: usize) []const u8 {
@@ -162,3 +179,23 @@ test "memory_list include_internal true includes autosave entries" {
     try std.testing.expect(std.mem.indexOf(u8, result.output, "autosave_user_1") != null);
 }
 
+test "memory_list filters markdown-encoded internal keys in content" {
+    const allocator = std.testing.allocator;
+    var sqlite_mem = try mem_root.SqliteMemory.init(allocator, ":memory:");
+    defer sqlite_mem.deinit();
+    const mem = sqlite_mem.memory();
+
+    try mem.store("MEMORY:3", "**last_hygiene_at**: 1772051598", .core, null);
+    try mem.store("MEMORY:4", "**Name**: User", .core, null);
+
+    var mt = MemoryListTool{ .memory = mem };
+    const t = mt.tool();
+    const parsed = try root.parseTestArgs("{\"limit\":10}");
+    defer parsed.deinit();
+    const result = try t.execute(allocator, parsed.value.object);
+    defer if (result.output.len > 0) allocator.free(result.output);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "last_hygiene_at") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "**Name**: User") != null);
+}

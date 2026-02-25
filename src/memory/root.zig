@@ -1231,7 +1231,13 @@ test "freeMessages frees all entries" {
     // No leak = pass (allocator is testing allocator with leak detection)
 }
 
+fn requireBackendEnabledForTests(name: []const u8) !void {
+    if (findBackend(name) == null) return error.SkipZigTest;
+}
+
 test "initRuntime none returns valid runtime" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1247,6 +1253,8 @@ test "initRuntime unknown backend returns null" {
 }
 
 test "initRuntime none deinit does not leak" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     rt.deinit();
@@ -1254,6 +1262,8 @@ test "initRuntime none deinit does not leak" {
 }
 
 test "initRuntime none has null db_path" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1279,11 +1289,15 @@ test "initRuntime sqlite returns full runtime" {
 }
 
 test "initRuntime with lifecycle defaults does not crash" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp/test_lifecycle");
     if (rt) |*r| r.deinit();
 }
 
 test "initRuntime with cache disabled leaves response_cache null" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp/test_nocache") orelse return;
     defer rt.deinit();
     try std.testing.expect(rt.response_cache == null);
@@ -1292,6 +1306,7 @@ test "initRuntime with cache disabled leaves response_cache null" {
 
 test "initRuntime with cache enabled creates ResponseCache" {
     if (!build_options.enable_sqlite) return error.SkipZigTest;
+    try requireBackendEnabledForTests("none");
 
     var rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
@@ -1307,6 +1322,8 @@ test "initRuntime with cache enabled creates ResponseCache" {
 }
 
 test "initRuntime creates engine with primary source" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1314,6 +1331,8 @@ test "initRuntime creates engine with primary source" {
 }
 
 test "initRuntime engine with qmd disabled has one source" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1323,6 +1342,8 @@ test "initRuntime engine with qmd disabled has one source" {
 }
 
 test "initRuntime engine with qmd enabled and include_default_memory=true has primary and qmd sources" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
         .qmd = .{
@@ -1340,6 +1361,8 @@ test "initRuntime engine with qmd enabled and include_default_memory=true has pr
 }
 
 test "initRuntime engine with qmd enabled and include_default_memory=false has qmd-only source" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
         .qmd = .{
@@ -1379,6 +1402,8 @@ test "MemoryRuntime.search without engine falls back to recall" {
 }
 
 test "MemoryRuntime.search with engine delegates" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1388,6 +1413,8 @@ test "MemoryRuntime.search with engine delegates" {
 }
 
 test "MemoryRuntime.search hybrid path respects caller limit" {
+    if (findBackend("memory") == null) return error.SkipZigTest;
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "memory" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1404,6 +1431,8 @@ test "MemoryRuntime.search hybrid path respects caller limit" {
 }
 
 test "initRuntime with hybrid disabled has no embedding provider" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     defer rt.deinit();
@@ -1415,6 +1444,8 @@ test "initRuntime with hybrid disabled has no embedding provider" {
 }
 
 test "initRuntime with search.provider=none has no vector store" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
         .search = .{
@@ -1527,6 +1558,8 @@ test "initRuntime durable_outbox uses max of embed/vector retry config" {
 }
 
 test "initRuntime resolves best_effort vector sync when outbox backend unavailable" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
         .search = .{
@@ -1549,6 +1582,8 @@ test "initRuntime resolves best_effort vector sync when outbox backend unavailab
 }
 
 test "initRuntime fail_fast returns null when durable outbox is unavailable" {
+    try requireBackendEnabledForTests("none");
+
     const rt = initRuntime(std.testing.allocator, &.{
         .backend = "none",
         .search = .{
@@ -1655,6 +1690,8 @@ test "MemoryRuntime.drainOutbox with no outbox returns 0" {
 }
 
 test "MemoryRuntime.deinit cleans up P3 resources" {
+    try requireBackendEnabledForTests("none");
+
     var rt = initRuntime(std.testing.allocator, &.{ .backend = "none" }, "/tmp") orelse
         return error.TestUnexpectedResult;
     // P3 fields are null for "none" backend with hybrid disabled, but deinit should handle that.

@@ -6,6 +6,7 @@ const skills_mod = @import("../skills.zig");
 const spawn_tool_mod = @import("../tools/spawn.zig");
 const subagent_mod = @import("../subagent.zig");
 const memory_mod = @import("../memory/root.zig");
+const config_types = @import("../config_types.zig");
 const config_module = @import("../config.zig");
 const capabilities_mod = @import("../capabilities.zig");
 const config_mutator = @import("../config_mutator.zig");
@@ -29,7 +30,12 @@ fn parseSlashCommand(message: []const u8) ?SlashCommand {
     }
     if (split_idx == 0) return null;
 
-    const name = body[0..split_idx];
+    const raw_name = body[0..split_idx];
+    const name = if (std.mem.indexOfScalar(u8, raw_name, '@')) |mention_sep|
+        raw_name[0..mention_sep]
+    else
+        raw_name;
+    if (name.len == 0) return null;
     var rest = body[split_idx..];
     if (rest.len > 0 and rest[0] == ':') {
         rest = rest[1..];
@@ -54,6 +60,29 @@ fn parsePositiveUsize(raw: []const u8) ?usize {
     const n = std.fmt.parseInt(usize, raw, 10) catch return null;
     if (n == 0) return null;
     return n;
+}
+
+fn isInternalMemoryKey(key: []const u8) bool {
+    return std.mem.startsWith(u8, key, "autosave_user_") or
+        std.mem.startsWith(u8, key, "autosave_assistant_") or
+        std.mem.eql(u8, key, "last_hygiene_at");
+}
+
+fn extractMarkdownMemoryKey(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, " \t");
+    if (!std.mem.startsWith(u8, trimmed, "**")) return null;
+    const rest = trimmed[2..];
+    const suffix = std.mem.indexOf(u8, rest, "**:") orelse return null;
+    if (suffix == 0) return null;
+    return rest[0..suffix];
+}
+
+fn isInternalMemoryEntryKeyOrContent(key: []const u8, content: []const u8) bool {
+    if (isInternalMemoryKey(key)) return true;
+    if (extractMarkdownMemoryKey(content)) |extracted| {
+        if (isInternalMemoryKey(extracted)) return true;
+    }
+    return false;
 }
 
 fn memoryRuntimePtr(self: anytype) ?*memory_mod.MemoryRuntime {
@@ -87,16 +116,35 @@ fn setModelName(self: anytype, model: []const u8) !void {
     }
 }
 
-fn hasProviderModelPrefix(model: []const u8) bool {
+fn isConfiguredProviderName(self: anytype, provider_name: []const u8) bool {
+    if (!@hasField(@TypeOf(self.*), "configured_providers")) return false;
+    for (self.configured_providers) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.name, provider_name)) return true;
+    }
+    return false;
+}
+
+fn hasExplicitProviderPrefix(self: anytype, model: []const u8) bool {
     const slash = std.mem.indexOfScalar(u8, model, '/') orelse return false;
-    return slash > 0 and slash + 1 < model.len;
+    if (slash == 0 or slash + 1 >= model.len) return false;
+
+    const provider_candidate = model[0..slash];
+    if (providers.classifyProvider(provider_candidate) != .unknown) return true;
+
+    var lower_buf: [128]u8 = undefined;
+    if (provider_candidate.len <= lower_buf.len) {
+        _ = std.ascii.lowerString(lower_buf[0..provider_candidate.len], provider_candidate);
+        if (providers.classifyProvider(lower_buf[0..provider_candidate.len]) != .unknown) return true;
+    }
+
+    return isConfiguredProviderName(self, provider_candidate);
 }
 
 fn configPrimaryModelForSelection(self: anytype, model: []const u8) ![]u8 {
     const trimmed = std.mem.trim(u8, model, " \t\r\n");
     if (trimmed.len == 0) return error.InvalidPath;
 
-    if (hasProviderModelPrefix(trimmed)) {
+    if (hasExplicitProviderPrefix(self, trimmed)) {
         return try self.allocator.dupe(u8, trimmed);
     }
 
@@ -127,6 +175,89 @@ fn invalidateSystemPromptCache(self: anytype) void {
     if (@hasField(@TypeOf(self.*), "has_system_prompt")) {
         self.has_system_prompt = false;
     }
+}
+
+test "configPrimaryModelForSelection treats unknown leading segment as model for default provider" {
+    const allocator = std.testing.allocator;
+    var dummy = struct {
+        allocator: std.mem.Allocator,
+        default_provider: []const u8,
+        configured_providers: []const config_types.ProviderEntry,
+    }{
+        .allocator = allocator,
+        .default_provider = "openrouter",
+        .configured_providers = &.{},
+    };
+
+    const primary = try configPrimaryModelForSelection(&dummy, "inception/mercury");
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("openrouter/inception/mercury", primary);
+}
+
+test "configPrimaryModelForSelection keeps explicit known provider prefix" {
+    const allocator = std.testing.allocator;
+    var dummy = struct {
+        allocator: std.mem.Allocator,
+        default_provider: []const u8,
+        configured_providers: []const config_types.ProviderEntry,
+    }{
+        .allocator = allocator,
+        .default_provider = "openrouter",
+        .configured_providers = &.{},
+    };
+
+    const primary = try configPrimaryModelForSelection(&dummy, "openrouter/inception/mercury");
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("openrouter/inception/mercury", primary);
+}
+
+test "configPrimaryModelForSelection treats known provider prefix case-insensitively" {
+    const allocator = std.testing.allocator;
+    var dummy = struct {
+        allocator: std.mem.Allocator,
+        default_provider: []const u8,
+        configured_providers: []const config_types.ProviderEntry,
+    }{
+        .allocator = allocator,
+        .default_provider = "openrouter",
+        .configured_providers = &.{},
+    };
+
+    const primary = try configPrimaryModelForSelection(&dummy, "OpenRouter/inception/mercury");
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("OpenRouter/inception/mercury", primary);
+}
+
+test "configPrimaryModelForSelection keeps explicit configured custom provider prefix" {
+    const allocator = std.testing.allocator;
+    const configured = [_]config_types.ProviderEntry{
+        .{ .name = "customgw", .base_url = "https://example.com/v1" },
+    };
+    var dummy = struct {
+        allocator: std.mem.Allocator,
+        default_provider: []const u8,
+        configured_providers: []const config_types.ProviderEntry,
+    }{
+        .allocator = allocator,
+        .default_provider = "openrouter",
+        .configured_providers = &configured,
+    };
+
+    const primary = try configPrimaryModelForSelection(&dummy, "customgw/model-a");
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("customgw/model-a", primary);
+}
+
+test "parseSlashCommand strips bot mention from command name" {
+    const parsed = parseSlashCommand("/model@nullclaw_bot openrouter/inception/mercury") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("model", parsed.name);
+    try std.testing.expectEqualStrings("openrouter/inception/mercury", parsed.arg);
+}
+
+test "parseSlashCommand strips bot mention with colon separator" {
+    const parsed = parseSlashCommand("/model@nullclaw_bot: gpt-5.2") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("model", parsed.name);
+    try std.testing.expectEqualStrings("gpt-5.2", parsed.arg);
 }
 
 fn setExecNodeId(self: anytype, value: ?[]const u8) !void {
@@ -1922,7 +2053,7 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
         "Usage: /memory <stats|status|reindex|count|search|get|list|drain-outbox>\n" ++
         "  /memory search <query> [--limit N]\n" ++
         "  /memory get <key>\n" ++
-        "  /memory list [--category C] [--limit N]";
+        "  /memory list [--category C] [--limit N] [--include-internal]";
 
     const parsed = splitFirstToken(arg);
     const sub = parsed.head;
@@ -2050,16 +2181,21 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
     if (std.mem.eql(u8, sub, "list")) {
         var limit: usize = 20;
         var category_opt: ?memory_mod.MemoryCategory = null;
+        var include_internal = false;
         var it = std.mem.tokenizeAny(u8, rest, " \t");
         while (it.next()) |tok| {
             if (std.mem.eql(u8, tok, "--limit")) {
-                const next = it.next() orelse return try self.allocator.dupe(u8, "Usage: /memory list [--category C] [--limit N]");
+                const next = it.next() orelse return try self.allocator.dupe(u8, "Usage: /memory list [--category C] [--limit N] [--include-internal]");
                 limit = parsePositiveUsize(next) orelse return try std.fmt.allocPrint(self.allocator, "Invalid --limit value: {s}", .{next});
                 continue;
             }
             if (std.mem.eql(u8, tok, "--category")) {
-                const next = it.next() orelse return try self.allocator.dupe(u8, "Usage: /memory list [--category C] [--limit N]");
+                const next = it.next() orelse return try self.allocator.dupe(u8, "Usage: /memory list [--category C] [--limit N] [--include-internal]");
                 category_opt = memory_mod.MemoryCategory.fromString(next);
+                continue;
+            }
+            if (std.mem.eql(u8, tok, "--include-internal")) {
+                include_internal = true;
                 continue;
             }
             return try std.fmt.allocPrint(self.allocator, "Unknown option for /memory list: {s}", .{tok});
@@ -2070,16 +2206,30 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
         };
         defer memory_mod.freeEntries(self.allocator, entries);
 
-        const shown = @min(limit, entries.len);
+        var filtered_total: usize = 0;
+        for (entries) |entry| {
+            if (!include_internal and isInternalMemoryEntryKeyOrContent(entry.key, entry.content)) continue;
+            filtered_total += 1;
+        }
+
+        if (filtered_total == 0) {
+            return try self.allocator.dupe(u8, "No memory entries found.");
+        }
+
+        const shown = @min(limit, filtered_total);
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.allocator);
         const w = out.writer(self.allocator);
-        try w.print("Memory entries: showing {d}/{d}\n", .{ shown, entries.len });
-        for (entries[0..shown], 0..) |e, idx| {
+        try w.print("Memory entries: showing {d}/{d}\n", .{ shown, filtered_total });
+        var written: usize = 0;
+        for (entries) |e| {
+            if (!include_internal and isInternalMemoryEntryKeyOrContent(e.key, e.content)) continue;
+            if (written >= shown) break;
             const preview_len = @min(@as(usize, 120), e.content.len);
             const preview = e.content[0..preview_len];
-            try w.print("  {d}. {s} [{s}] {s}\n", .{ idx + 1, e.key, e.category.toString(), e.timestamp });
+            try w.print("  {d}. {s} [{s}] {s}\n", .{ written + 1, e.key, e.category.toString(), e.timestamp });
             try w.print("     {s}{s}\n", .{ preview, if (e.content.len > preview_len) "..." else "" });
+            written += 1;
         }
         return try out.toOwnedSlice(self.allocator);
     }
