@@ -32,7 +32,14 @@
   "memory": {
     "backend": "sqlite",
     "auto_save": true,
-    "hygiene_enabled": true
+    "lifecycle": {
+      "hygiene_enabled": true
+    },
+    "postgres": {
+      "url": "postgresql://user:pass@localhost:5432/nullclaw",
+      "schema": "public",
+      "table": "memories"
+    }
   },
 
   "reliability": {

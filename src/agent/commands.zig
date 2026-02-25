@@ -156,10 +156,8 @@ fn clearSessionState(self: anytype) void {
     self.clearHistory();
     clearPendingExecCommand(self);
 
-    if (self.mem) |mem| {
-        if (mem.asSqlite()) |sqlite_mem| {
-            sqlite_mem.clearAutoSaved(self.memory_session_id) catch {};
-        }
+    if (self.session_store) |store| {
+        store.clearAutoSaved(self.memory_session_id) catch {};
     }
 }
 

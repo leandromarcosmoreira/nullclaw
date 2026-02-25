@@ -11,6 +11,7 @@ const std = @import("std");
 const platform = @import("platform.zig");
 const Config = @import("config.zig").Config;
 const memory_root = @import("memory/root.zig");
+const migrate_mod = @import("memory/lifecycle/migrate.zig");
 
 const log = std.log.scoped(.migration);
 
@@ -69,6 +70,16 @@ pub fn migrateOpenclaw(
     // Read markdown entries from source
     try readOpenclawMarkdownEntries(allocator, source, &entries, &stats);
 
+    // Track markdown keys for dedup against SQLite
+    var seen_keys = std.StringHashMap(void).init(allocator);
+    defer seen_keys.deinit();
+    for (entries.items) |e| {
+        seen_keys.put(e.key, {}) catch {};
+    }
+
+    // Read brain.db entries (try memory/brain.db and workspace-level brain.db)
+    readBrainDbEntries(allocator, source, &entries, &stats, &seen_keys);
+
     if (entries.items.len == 0) {
         return stats;
     }
@@ -78,13 +89,10 @@ pub fn migrateOpenclaw(
     }
 
     // Open the target memory backend
-    const db_path = try std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" });
-    defer allocator.free(db_path);
-
-    var mem = memory_root.createMemory(allocator, config.memory_backend, db_path) catch {
+    var mem_rt = memory_root.initRuntime(allocator, &.{ .backend = config.memory_backend }, config.workspace_dir) orelse
         return error.TargetMemoryOpenFailed;
-    };
-    defer mem.deinit();
+    defer mem_rt.deinit();
+    var mem = mem_rt.memory;
 
     // Import each entry into target memory, renaming conflicts
     for (entries.items) |entry| {
@@ -232,6 +240,62 @@ fn resolveOpenclawWorkspace(allocator: std.mem.Allocator, source: ?[]const u8) !
 /// Check if two paths refer to the same location.
 fn pathsEqual(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// Read brain.db entries from known locations, deduplicating against seen keys.
+fn readBrainDbEntries(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    entries: *std.ArrayList(SourceEntry),
+    stats: *MigrationStats,
+    seen_keys: *std.StringHashMap(void),
+) void {
+    // Try memory/brain.db (common OpenClaw layout)
+    const paths = [_][]const u8{ "memory/brain.db", "brain.db" };
+    for (&paths) |rel| {
+        const db_path = std.fs.path.joinZ(allocator, &.{ source, rel }) catch continue;
+        defer allocator.free(std.mem.span(db_path));
+
+        // Check file exists before attempting open
+        const abs_path = std.mem.span(db_path);
+        std.fs.cwd().access(abs_path, .{}) catch continue;
+
+        const sqlite_entries = migrate_mod.readBrainDb(allocator, db_path) catch |err| {
+            log.warn("brain.db read failed at {s}: {}", .{ abs_path, err });
+            continue;
+        };
+        defer migrate_mod.freeSqliteEntries(allocator, sqlite_entries);
+
+        for (sqlite_entries) |se| {
+            // Dedup: prefer markdown (human-edited) over SQLite
+            if (seen_keys.contains(se.key)) continue;
+
+            const key = allocator.dupe(u8, se.key) catch continue;
+            const content = allocator.dupe(u8, se.content) catch {
+                allocator.free(key);
+                continue;
+            };
+            const category = allocator.dupe(u8, se.category) catch {
+                allocator.free(key);
+                allocator.free(content);
+                continue;
+            };
+
+            entries.append(allocator, .{
+                .key = key,
+                .content = content,
+                .category = category,
+            }) catch {
+                allocator.free(key);
+                allocator.free(content);
+                allocator.free(category);
+                continue;
+            };
+
+            seen_keys.put(key, {}) catch {};
+            stats.from_sqlite += 1;
+        }
+    }
 }
 
 // ── Errors ───────────────────────────────────────────────────────

@@ -1024,15 +1024,9 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     }
 
     // Create optional memory backend (don't fail if unavailable)
-    var mem_opt: ?yc.memory.Memory = null;
-    const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
-    defer if (db_path) |p| allocator.free(p);
-    if (db_path) |p| {
-        if (yc.memory.createMemory(allocator, config.memory.backend, p)) |mem| {
-            mem_opt = mem;
-        } else |_| {}
-    }
-    defer if (mem_opt) |m| m.deinit();
+    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
 
     // Create provider with reliability wrapper (retry + fallback chains).
     var runtime_provider = try yc.providers.runtime_bundle.RuntimeProviderBundle.init(allocator, config);
@@ -1044,7 +1038,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     const obs = noop_obs.observer();
 
     // Initialize session manager
-    var session_mgr = yc.session.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs);
+    var session_mgr = yc.session.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
     defer session_mgr.deinit();
 
@@ -1299,15 +1293,9 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
     }
 
     // Create optional memory backend (don't fail if unavailable)
-    var mem_opt: ?yc.memory.Memory = null;
-    const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
-    defer if (db_path) |p| allocator.free(p);
-    if (db_path) |p| {
-        if (yc.memory.createMemory(allocator, config.memory.backend, p)) |mem| {
-            mem_opt = mem;
-        } else |_| {}
-    }
-    defer if (mem_opt) |m| m.deinit();
+    var mem_rt = yc.memory.initRuntime(allocator, &config.memory, config.workspace_dir);
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?yc.memory.Memory = if (mem_rt) |rt| rt.memory else null;
 
     // Create noop observer
     var noop_obs = yc.observability.NoopObserver{};
@@ -1329,7 +1317,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
 
     std.debug.print("  Polling for messages... (Ctrl+C to stop)\n\n", .{});
 
-    var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs);
+    var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
     defer session_mgr.deinit();
 

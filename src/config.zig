@@ -491,10 +491,12 @@ pub const Config = struct {
         try w.print("  \"memory\": {{\n", .{});
         try w.print("    \"backend\": \"{s}\",\n", .{self.memory.backend});
         try w.print("    \"auto_save\": {s},\n", .{if (self.memory.auto_save) "true" else "false"});
-        try w.print("    \"hygiene_enabled\": {s},\n", .{if (self.memory.hygiene_enabled) "true" else "false"});
-        try w.print("    \"archive_after_days\": {d},\n", .{self.memory.archive_after_days});
-        try w.print("    \"purge_after_days\": {d},\n", .{self.memory.purge_after_days});
-        try w.print("    \"conversation_retention_days\": {d}\n", .{self.memory.conversation_retention_days});
+        try w.print("    \"lifecycle\": {{\n", .{});
+        try w.print("      \"hygiene_enabled\": {s},\n", .{if (self.memory.lifecycle.hygiene_enabled) "true" else "false"});
+        try w.print("      \"archive_after_days\": {d},\n", .{self.memory.lifecycle.archive_after_days});
+        try w.print("      \"purge_after_days\": {d},\n", .{self.memory.lifecycle.purge_after_days});
+        try w.print("      \"conversation_retention_days\": {d}\n", .{self.memory.lifecycle.conversation_retention_days});
+        try w.print("    }}\n", .{});
         try w.print("  }},\n", .{});
 
         // Gateway

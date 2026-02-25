@@ -10,7 +10,7 @@
 //! Mirrors ZeroClaw's `LucidMemory` (src/memory/lucid.rs).
 
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
 const MemoryEntry = root.MemoryEntry;
@@ -468,6 +468,39 @@ pub const LucidMemory = struct {
             .vtable = &vtable,
         };
     }
+
+    // ── SessionStore vtable ────────────────────────────────────────
+
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+        const self = castSelf(ptr);
+        return self.local.saveMessage(session_id, role, content);
+    }
+
+    fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {
+        const self = castSelf(ptr);
+        return self.local.loadMessages(allocator, session_id);
+    }
+
+    fn implSessionClearMessages(ptr: *anyopaque, session_id: []const u8) anyerror!void {
+        const self = castSelf(ptr);
+        return self.local.clearMessages(session_id);
+    }
+
+    fn implSessionClearAutoSaved(ptr: *anyopaque, session_id: ?[]const u8) anyerror!void {
+        const self = castSelf(ptr);
+        return self.local.clearAutoSaved(session_id);
+    }
+
+    const session_vtable = root.SessionStore.VTable{
+        .saveMessage = &implSessionSaveMessage,
+        .loadMessages = &implSessionLoadMessages,
+        .clearMessages = &implSessionClearMessages,
+        .clearAutoSaved = &implSessionClearAutoSaved,
+    };
+
+    pub fn sessionStore(self: *Self) root.SessionStore {
+        return .{ .ptr = @ptrCast(self), .vtable = &session_vtable };
+    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -853,4 +886,50 @@ test "lucid list accepts session_id" {
     const results = try m.list(allocator, null, "session-abc");
     defer root.freeEntries(allocator, results);
     try std.testing.expect(results.len >= 1);
+}
+
+// ── SessionStore vtable tests ─────────────────────────────────────
+
+test "lucid sessionStore returns valid vtable" {
+    const allocator = std.testing.allocator;
+    var mem = try LucidMemory.initWithOptions(
+        allocator,
+        ":memory:",
+        "nonexistent-lucid-binary",
+        "/tmp/test",
+        200,
+        3,
+        2000,
+    );
+    defer mem.deinit();
+
+    const store = mem.sessionStore();
+    try std.testing.expect(store.vtable == &LucidMemory.session_vtable);
+}
+
+test "lucid sessionStore saveMessage + loadMessages roundtrip" {
+    const allocator = std.testing.allocator;
+    var mem = try LucidMemory.initWithOptions(
+        allocator,
+        ":memory:",
+        "nonexistent-lucid-binary",
+        "/tmp/test",
+        200,
+        3,
+        2000,
+    );
+    defer mem.deinit();
+
+    const store = mem.sessionStore();
+    try store.saveMessage("s1", "user", "hello from lucid");
+    try store.saveMessage("s1", "assistant", "hi back");
+
+    const msgs = try store.loadMessages(allocator, "s1");
+    defer root.freeMessages(allocator, msgs);
+
+    try std.testing.expectEqual(@as(usize, 2), msgs.len);
+    try std.testing.expectEqualStrings("user", msgs[0].role);
+    try std.testing.expectEqualStrings("hello from lucid", msgs[0].content);
+    try std.testing.expectEqualStrings("assistant", msgs[1].role);
+    try std.testing.expectEqualStrings("hi back", msgs[1].content);
 }

@@ -1,0 +1,486 @@
+//! VectorStore — vtable interface + SQLite shared implementation.
+//!
+//! Provides a generic vector store abstraction for embedding-based
+//! similarity search, plus a concrete SQLite implementation that
+//! shares the database handle with SqliteMemory (memory_embeddings table).
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const vector = @import("math.zig");
+const sqlite_mod = @import("../engines/sqlite.zig");
+const c = sqlite_mod.c;
+const SQLITE_STATIC = sqlite_mod.SQLITE_STATIC;
+
+// ── Result types ──────────────────────────────────────────────────
+
+pub const VectorResult = struct {
+    key: []const u8,
+    score: f32, // cosine similarity [0,1]
+
+    pub fn deinit(self: *const VectorResult, allocator: Allocator) void {
+        allocator.free(self.key);
+    }
+};
+
+pub fn freeVectorResults(allocator: Allocator, results: []VectorResult) void {
+    for (results) |*r| r.deinit(allocator);
+    allocator.free(results);
+}
+
+// ── VectorStore vtable ────────────────────────────────────────────
+
+pub const VectorStore = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        upsert: *const fn (ptr: *anyopaque, key: []const u8, embedding: []const f32) anyerror!void,
+        search: *const fn (ptr: *anyopaque, alloc: Allocator, query_embedding: []const f32, limit: u32) anyerror![]VectorResult,
+        delete: *const fn (ptr: *anyopaque, key: []const u8) anyerror!void,
+        count: *const fn (ptr: *anyopaque) anyerror!usize,
+        deinit: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn upsert(self: VectorStore, key: []const u8, embedding: []const f32) !void {
+        return self.vtable.upsert(self.ptr, key, embedding);
+    }
+
+    pub fn search(self: VectorStore, alloc: Allocator, query_embedding: []const f32, limit: u32) ![]VectorResult {
+        return self.vtable.search(self.ptr, alloc, query_embedding, limit);
+    }
+
+    pub fn delete(self: VectorStore, key: []const u8) !void {
+        return self.vtable.delete(self.ptr, key);
+    }
+
+    pub fn count(self: VectorStore) !usize {
+        return self.vtable.count(self.ptr);
+    }
+
+    pub fn deinitStore(self: VectorStore) void {
+        self.vtable.deinit(self.ptr);
+    }
+};
+
+// ── SqliteSharedVectorStore ───────────────────────────────────────
+
+pub const SqliteSharedVectorStore = struct {
+    db: ?*c.sqlite3, // borrowed from SqliteMemory — NOT owned
+    allocator: Allocator,
+    owns_self: bool = false,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator, db: ?*c.sqlite3) SqliteSharedVectorStore {
+        return .{
+            .db = db,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn store(self: *SqliteSharedVectorStore) VectorStore {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &vtable_instance,
+        };
+    }
+
+    pub fn deinit(self: *SqliteSharedVectorStore) void {
+        // Do NOT close the db — it's borrowed from SqliteMemory.
+        if (self.owns_self) {
+            self.allocator.destroy(self);
+        }
+    }
+
+    // ── vtable implementations ────────────────────────────────────
+
+    fn implUpsert(ptr: *anyopaque, key: []const u8, embedding: []const f32) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        const blob = try vector.vecToBytes(self.allocator, embedding);
+        defer self.allocator.free(blob);
+
+        const sql = "INSERT OR REPLACE INTO memory_embeddings (memory_key, embedding, updated_at) VALUES (?1, ?2, datetime('now'))";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, key.ptr, @intCast(key.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_blob(stmt, 2, blob.ptr, @intCast(blob.len), SQLITE_STATIC);
+
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
+    }
+
+    fn implSearch(ptr: *anyopaque, alloc: Allocator, query_embedding: []const f32, limit: u32) anyerror![]VectorResult {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        const sql = "SELECT memory_key, embedding FROM memory_embeddings";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var candidates: std.ArrayList(VectorResult) = .empty;
+        errdefer {
+            for (candidates.items) |*r| r.deinit(alloc);
+            candidates.deinit(alloc);
+        }
+
+        while (true) {
+            rc = c.sqlite3_step(stmt);
+            if (rc == c.SQLITE_ROW) {
+                // Read key
+                const key_ptr = c.sqlite3_column_text(stmt, 0);
+                const key_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
+                if (key_ptr == null) continue;
+
+                // Read embedding blob
+                const blob_ptr: ?[*]const u8 = @ptrCast(c.sqlite3_column_blob(stmt, 1));
+                const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
+
+                if (blob_ptr == null or blob_len == 0) continue;
+
+                const row_vec = try vector.bytesToVec(alloc, blob_ptr.?[0..blob_len]);
+                defer alloc.free(row_vec);
+
+                const score = vector.cosineSimilarity(query_embedding, row_vec);
+                const owned_key = try alloc.dupe(u8, key_ptr[0..key_len]);
+
+                try candidates.append(alloc, .{
+                    .key = owned_key,
+                    .score = score,
+                });
+            } else break;
+        }
+
+        // Sort by score descending
+        std.mem.sortUnstable(VectorResult, candidates.items, {}, struct {
+            fn lessThan(_: void, a: VectorResult, b: VectorResult) bool {
+                return a.score > b.score;
+            }
+        }.lessThan);
+
+        // Truncate to limit
+        const actual_limit = @min(@as(usize, limit), candidates.items.len);
+
+        // Free excess results beyond the limit
+        for (candidates.items[actual_limit..]) |*r| r.deinit(alloc);
+
+        // Shrink the list and return owned slice
+        const result = try alloc.dupe(VectorResult, candidates.items[0..actual_limit]);
+        candidates.deinit(alloc);
+        return result;
+    }
+
+    fn implDelete(ptr: *anyopaque, key: []const u8) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        const sql = "DELETE FROM memory_embeddings WHERE memory_key = ?1";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_text(stmt, 1, key.ptr, @intCast(key.len), SQLITE_STATIC);
+
+        rc = c.sqlite3_step(stmt);
+        if (rc != c.SQLITE_DONE) return error.StepFailed;
+    }
+
+    fn implCount(ptr: *anyopaque) anyerror!usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        const sql = "SELECT COUNT(*) FROM memory_embeddings";
+        var stmt: ?*c.sqlite3_stmt = null;
+        var rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        rc = c.sqlite3_step(stmt);
+        if (rc == c.SQLITE_ROW) {
+            const n = c.sqlite3_column_int64(stmt, 0);
+            return @intCast(n);
+        }
+        return 0;
+    }
+
+    fn implDeinit(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.deinit();
+    }
+
+    const vtable_instance = VectorStore.VTable{
+        .upsert = &implUpsert,
+        .search = &implSearch,
+        .delete = &implDelete,
+        .count = &implCount,
+        .deinit = &implDeinit,
+    };
+};
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+test "init with in-memory sqlite" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const cnt = try s.count();
+    try std.testing.expectEqual(@as(usize, 0), cnt);
+}
+
+test "upsert stores embedding then verify with count" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const emb = [_]f32{ 1.0, 2.0, 3.0 };
+    try s.upsert("key1", &emb);
+
+    const cnt = try s.count();
+    try std.testing.expectEqual(@as(usize, 1), cnt);
+}
+
+test "upsert overwrites existing key" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const emb1 = [_]f32{ 1.0, 2.0, 3.0 };
+    const emb2 = [_]f32{ 4.0, 5.0, 6.0 };
+    try s.upsert("key1", &emb1);
+    try s.upsert("key1", &emb2);
+
+    const cnt = try s.count();
+    try std.testing.expectEqual(@as(usize, 1), cnt);
+}
+
+test "search returns sorted results" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+
+    // Insert 3 items: a is very similar to query, b is less similar, c is orthogonal
+    const query = [_]f32{ 1.0, 0.0, 0.0 };
+    const emb_a = [_]f32{ 0.9, 0.1, 0.0 }; // very similar to query
+    const emb_b = [_]f32{ 0.5, 0.5, 0.5 }; // partially similar
+    const emb_c = [_]f32{ 0.0, 0.0, 1.0 }; // orthogonal
+
+    try s.upsert("a", &emb_a);
+    try s.upsert("b", &emb_b);
+    try s.upsert("c", &emb_c);
+
+    const results = try s.search(std.testing.allocator, &query, 3);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+    // Best match should be "a"
+    try std.testing.expectEqualStrings("a", results[0].key);
+    // Scores should be descending
+    try std.testing.expect(results[0].score >= results[1].score);
+    try std.testing.expect(results[1].score >= results[2].score);
+}
+
+test "search with no data returns empty" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const query = [_]f32{ 1.0, 2.0, 3.0 };
+    const results = try s.search(std.testing.allocator, &query, 10);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "search respects limit" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+
+    // Insert 5 items
+    var bufs: [5][8]u8 = undefined;
+    for (0..5) |i| {
+        const key = std.fmt.bufPrint(&bufs[i], "key_{d}", .{i}) catch "?";
+        var emb = [_]f32{ 1.0, 0.0, 0.0 };
+        emb[0] = 1.0 - @as(f32, @floatFromInt(i)) * 0.1;
+        try s.upsert(key, &emb);
+    }
+
+    const results = try s.search(std.testing.allocator, &[_]f32{ 1.0, 0.0, 0.0 }, 2);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+}
+
+test "delete removes embedding" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const emb = [_]f32{ 1.0, 2.0, 3.0 };
+    try s.upsert("key1", &emb);
+    try std.testing.expectEqual(@as(usize, 1), try s.count());
+
+    try s.delete("key1");
+    try std.testing.expectEqual(@as(usize, 0), try s.count());
+}
+
+test "delete non-existent key is no-op" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    // Should not error
+    try s.delete("nonexistent");
+    try std.testing.expectEqual(@as(usize, 0), try s.count());
+}
+
+test "count returns correct count" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    try std.testing.expectEqual(@as(usize, 0), try s.count());
+
+    try s.upsert("a", &[_]f32{ 1.0, 0.0 });
+    try std.testing.expectEqual(@as(usize, 1), try s.count());
+
+    try s.upsert("b", &[_]f32{ 0.0, 1.0 });
+    try std.testing.expectEqual(@as(usize, 2), try s.count());
+
+    try s.upsert("c", &[_]f32{ 1.0, 1.0 });
+    try std.testing.expectEqual(@as(usize, 3), try s.count());
+}
+
+test "VectorResult deinit frees key" {
+    const allocator = std.testing.allocator;
+    const key = try allocator.dupe(u8, "test_key");
+    const r = VectorResult{ .key = key, .score = 0.5 };
+    r.deinit(allocator);
+    // No leak = pass (testing allocator detects leaks)
+}
+
+test "freeVectorResults frees slice" {
+    const allocator = std.testing.allocator;
+    var results = try allocator.alloc(VectorResult, 2);
+    results[0] = .{ .key = try allocator.dupe(u8, "key_a"), .score = 0.9 };
+    results[1] = .{ .key = try allocator.dupe(u8, "key_b"), .score = 0.5 };
+    freeVectorResults(allocator, results);
+    // No leak = pass
+}
+
+test "cosine similarity cross-check: exact match returns score near 1.0" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const emb = [_]f32{ 1.0, 2.0, 3.0 };
+    try s.upsert("exact", &emb);
+
+    const results = try s.search(std.testing.allocator, &emb, 1);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("exact", results[0].key);
+    try std.testing.expect(@abs(results[0].score - 1.0) < 0.001);
+}
+
+test "round-trip: upsert then search finds the key" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const emb = [_]f32{ 0.5, 0.5, 0.5, 0.5 };
+    try s.upsert("roundtrip_key", &emb);
+
+    const results = try s.search(std.testing.allocator, &emb, 10);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("roundtrip_key", results[0].key);
+    try std.testing.expect(results[0].score > 0.99);
+}
+
+test "multiple upserts + search returns best match" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+
+    // Insert several items
+    try s.upsert("north", &[_]f32{ 1.0, 0.0, 0.0 });
+    try s.upsert("east", &[_]f32{ 0.0, 1.0, 0.0 });
+    try s.upsert("up", &[_]f32{ 0.0, 0.0, 1.0 });
+    try s.upsert("northeast", &[_]f32{ 0.7, 0.7, 0.0 });
+
+    // Search for something close to "north"
+    const query = [_]f32{ 0.95, 0.05, 0.0 };
+    const results = try s.search(std.testing.allocator, &query, 4);
+    defer freeVectorResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 4), results.len);
+    // Best match should be "north"
+    try std.testing.expectEqualStrings("north", results[0].key);
+}
+
+test "empty embedding handled gracefully" {
+    var mem = try sqlite_mod.SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    var vs = SqliteSharedVectorStore.init(std.testing.allocator, mem.db);
+    defer vs.deinit();
+
+    const s = vs.store();
+    const empty: []const f32 = &.{};
+
+    // Upsert with empty vec should not crash
+    try s.upsert("empty_key", empty);
+    try std.testing.expectEqual(@as(usize, 1), try s.count());
+
+    // Search with empty query should not crash (cosine returns 0 for empty)
+    const results = try s.search(std.testing.allocator, empty, 10);
+    defer freeVectorResults(std.testing.allocator, results);
+    // The empty embedding row has 0-length blob, bytesToVec returns empty, cosine returns 0
+    // Result is still returned (score = 0)
+}

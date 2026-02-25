@@ -71,7 +71,7 @@ pub const ChannelRuntime = struct {
     session_mgr: session_mod.SessionManager,
     provider_bundle: provider_runtime.RuntimeProviderBundle,
     tools: []const tools_mod.Tool,
-    mem: ?memory_mod.Memory,
+    mem_rt: ?memory_mod.MemoryRuntime,
     noop_obs: *observability.NoopObserver,
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
@@ -105,15 +105,9 @@ pub const ChannelRuntime = struct {
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 
         // Optional memory backend
-        var mem_opt: ?memory_mod.Memory = null;
-        const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
-        defer if (db_path) |p| allocator.free(p);
-        if (db_path) |p| {
-            if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
-                mem_opt = mem;
-            } else |_| {}
-        }
-        errdefer if (mem_opt) |m| m.deinit();
+        var mem_rt = memory_mod.initRuntime(allocator, &config.memory, config.workspace_dir);
+        errdefer if (mem_rt) |*rt| rt.deinit();
+        const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
 
         // Noop observer (heap for vtable stability)
         const noop_obs = try allocator.create(observability.NoopObserver);
@@ -122,7 +116,7 @@ pub const ChannelRuntime = struct {
         const obs = noop_obs.observer();
 
         // Session manager
-        const session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs);
+        const session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
 
         // Self — heap-allocated so pointers remain stable
         const self = try allocator.create(ChannelRuntime);
@@ -132,7 +126,7 @@ pub const ChannelRuntime = struct {
             .session_mgr = session_mgr,
             .provider_bundle = runtime_provider,
             .tools = tools,
-            .mem = mem_opt,
+            .mem_rt = mem_rt,
             .noop_obs = noop_obs,
         };
         return self;
@@ -142,7 +136,7 @@ pub const ChannelRuntime = struct {
         const alloc = self.allocator;
         self.session_mgr.deinit();
         if (self.tools.len > 0) tools_mod.deinitTools(alloc, self.tools);
-        if (self.mem) |m| m.deinit();
+        if (self.mem_rt) |*rt| rt.deinit();
         self.provider_bundle.deinit();
         alloc.destroy(self.noop_obs);
         alloc.destroy(self);

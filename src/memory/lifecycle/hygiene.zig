@@ -7,7 +7,7 @@
 //!   - Prunes old conversation rows from SQLite
 
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 const Memory = root.Memory;
 
 /// Default hygiene interval in seconds (12 hours).

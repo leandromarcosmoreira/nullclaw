@@ -288,7 +288,7 @@ fn parseEmbeddingResponse(allocator: std.mem.Allocator, json_bytes: []const u8) 
 
 // ── Embedding cache ───────────────────────────────────────────────
 
-const sqlite_mod = @import("sqlite.zig");
+const sqlite_mod = @import("../engines/sqlite.zig");
 const SqliteMemory = sqlite_mod.SqliteMemory;
 const c = sqlite_mod.c;
 const SQLITE_STATIC = sqlite_mod.SQLITE_STATIC;

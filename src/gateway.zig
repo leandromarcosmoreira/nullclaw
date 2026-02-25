@@ -1996,7 +1996,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     var provider_bundle_opt: ?providers.runtime_bundle.RuntimeProviderBundle = null;
     var session_mgr_opt: ?session_mod.SessionManager = null;
     var tools_slice: []const tools_mod.Tool = &.{};
-    var mem_opt: ?memory_mod.Memory = null;
+    var mem_rt: ?memory_mod.MemoryRuntime = null;
     var noop_obs_gateway = observability.NoopObserver{};
 
     if (config_opt) |cfg_ptr| {
@@ -2047,13 +2047,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
             const resolved_api_key = bundle.primaryApiKey();
 
             // Optional memory backend.
-            const db_path = std.fs.path.joinZ(allocator, &.{ cfg.workspace_dir, "memory.db" }) catch null;
-            defer if (db_path) |p| allocator.free(p);
-            if (db_path) |p| {
-                if (memory_mod.createMemory(allocator, cfg.memory.backend, p)) |mem| {
-                    mem_opt = mem;
-                } else |_| {}
-            }
+            mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);
 
             // Tools.
             tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
@@ -2064,14 +2058,15 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 .fallback_api_key = resolved_api_key,
             }) catch &.{};
 
-            session_mgr_opt = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer());
+            const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
+            session_mgr_opt = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, noop_obs_gateway.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
         }
     }
     if (state.pairing_guard == null) {
         state.pairing_guard = try PairingGuard.init(allocator, true, &.{});
     }
     defer if (provider_bundle_opt) |*bundle| bundle.deinit();
-    defer if (mem_opt) |m| m.deinit();
+    defer if (mem_rt) |*rt| rt.deinit();
     defer if (tools_slice.len > 0) tools_mod.deinitTools(allocator, tools_slice);
     defer if (session_mgr_opt) |*sm| sm.deinit();
 

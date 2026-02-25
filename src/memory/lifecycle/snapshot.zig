@@ -6,8 +6,8 @@
 //!   - should_hydrate: checks if memory is empty but snapshot exists
 
 const std = @import("std");
-const root = @import("root.zig");
-const json_util = @import("../json_util.zig");
+const root = @import("../root.zig");
+const json_util = @import("../../json_util.zig");
 const Memory = root.Memory;
 const MemoryEntry = root.MemoryEntry;
 const MemoryCategory = root.MemoryCategory;
@@ -152,7 +152,7 @@ test "shouldHydrate no memory no snapshot" {
 
 test "shouldHydrate with non-empty memory" {
     // Create an in-memory SQLite for test
-    const sqlite = @import("sqlite.zig");
+    const sqlite = @import("../engines/sqlite.zig");
     var mem_impl = try sqlite.SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem_impl.deinit();
     const mem = mem_impl.memory();
@@ -165,7 +165,7 @@ test "shouldHydrate with non-empty memory" {
 }
 
 test "exportSnapshot returns zero for empty memory" {
-    const sqlite = @import("sqlite.zig");
+    const sqlite = @import("../engines/sqlite.zig");
     var mem_impl = try sqlite.SqliteMemory.init(std.testing.allocator, ":memory:");
     defer mem_impl.deinit();
     const mem = mem_impl.memory();

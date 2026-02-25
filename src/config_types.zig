@@ -427,23 +427,157 @@ pub const ChannelsConfig = struct {
 pub const MemoryConfig = struct {
     backend: []const u8 = "sqlite",
     auto_save: bool = true,
+    citations: []const u8 = "auto",
+    search: MemorySearchConfig = .{},
+    qmd: MemoryQmdConfig = .{},
+    lifecycle: MemoryLifecycleConfig = .{},
+    response_cache: MemoryResponseCacheConfig = .{},
+    reliability: MemoryReliabilityConfig = .{},
+    postgres: MemoryPostgresConfig = .{},
+};
+
+pub const MemorySearchConfig = struct {
+    enabled: bool = true,
+    provider: []const u8 = "none",
+    model: []const u8 = "text-embedding-3-small",
+    dimensions: u32 = 1536,
+    fallback_provider: []const u8 = "none",
+    store: MemoryVectorStoreConfig = .{},
+    chunking: MemoryChunkingConfig = .{},
+    sync: MemorySyncConfig = .{},
+    query: MemoryQueryConfig = .{},
+    cache: MemoryEmbeddingCacheConfig = .{},
+};
+
+pub const MemoryQmdConfig = struct {
+    enabled: bool = false,
+    command: []const u8 = "qmd",
+    search_mode: []const u8 = "search",
+    include_default_memory: bool = true,
+    mcporter: QmdMcporterConfig = .{},
+    paths: []const QmdIndexPath = &.{},
+    sessions: QmdSessionConfig = .{},
+    update: QmdUpdateConfig = .{},
+    limits: QmdLimitsConfig = .{},
+};
+
+pub const QmdIndexPath = struct {
+    path: []const u8 = "",
+    name: []const u8 = "",
+    pattern: []const u8 = "**/*.md",
+};
+
+pub const QmdMcporterConfig = struct {
+    enabled: bool = false,
+    server_name: []const u8 = "qmd",
+    start_daemon: bool = true,
+};
+
+pub const QmdSessionConfig = struct {
+    enabled: bool = false,
+    export_dir: []const u8 = "",
+    retention_days: u32 = 30,
+};
+
+pub const QmdUpdateConfig = struct {
+    interval_ms: u32 = 300_000,
+    debounce_ms: u32 = 15_000,
+    on_boot: bool = true,
+    wait_for_boot_sync: bool = false,
+    embed_interval_ms: u32 = 3_600_000,
+    command_timeout_ms: u32 = 30_000,
+    update_timeout_ms: u32 = 120_000,
+    embed_timeout_ms: u32 = 120_000,
+};
+
+pub const QmdLimitsConfig = struct {
+    max_results: u32 = 6,
+    max_snippet_chars: u32 = 700,
+    max_injected_chars: u32 = 4_000,
+    timeout_ms: u32 = 4_000,
+};
+
+pub const MemoryVectorStoreConfig = struct {
+    kind: []const u8 = "auto",
+    sidecar_path: []const u8 = "",
+    qdrant_url: []const u8 = "",
+    qdrant_collection: []const u8 = "nullclaw_memories",
+};
+
+pub const MemoryChunkingConfig = struct {
+    max_tokens: u32 = 512,
+    overlap: u32 = 64,
+};
+
+pub const MemorySyncConfig = struct {
+    mode: []const u8 = "best_effort",
+    embed_timeout_ms: u32 = 15_000,
+    vector_timeout_ms: u32 = 5_000,
+    embed_max_retries: u32 = 2,
+    vector_max_retries: u32 = 2,
+};
+
+pub const MemoryQueryConfig = struct {
+    max_results: u32 = 6,
+    min_score: f64 = 0.0,
+    merge_strategy: []const u8 = "rrf",
+    rrf_k: u32 = 60,
+    hybrid: MemoryHybridConfig = .{},
+};
+
+pub const MemoryHybridConfig = struct {
+    enabled: bool = false,
+    vector_weight: f64 = 0.7,
+    text_weight: f64 = 0.3,
+    candidate_multiplier: u32 = 4,
+    mmr: MemoryMmrConfig = .{},
+    temporal_decay: MemoryTemporalDecayConfig = .{},
+};
+
+pub const MemoryMmrConfig = struct {
+    enabled: bool = false,
+    lambda: f64 = 0.7,
+};
+
+pub const MemoryTemporalDecayConfig = struct {
+    enabled: bool = false,
+    half_life_days: u32 = 30,
+};
+
+pub const MemoryEmbeddingCacheConfig = struct {
+    enabled: bool = true,
+    max_entries: u32 = 10_000,
+};
+
+pub const MemoryLifecycleConfig = struct {
     hygiene_enabled: bool = true,
     archive_after_days: u32 = 7,
     purge_after_days: u32 = 30,
     conversation_retention_days: u32 = 30,
-    embedding_provider: []const u8 = "none",
-    embedding_model: []const u8 = "text-embedding-3-small",
-    embedding_dimensions: u32 = 1536,
-    vector_weight: f64 = 0.7,
-    keyword_weight: f64 = 0.3,
-    embedding_cache_size: u32 = 10_000,
-    chunk_max_tokens: u32 = 512,
-    response_cache_enabled: bool = false,
-    response_cache_ttl_minutes: u32 = 60,
-    response_cache_max_entries: u32 = 5_000,
     snapshot_enabled: bool = false,
     snapshot_on_hygiene: bool = false,
     auto_hydrate: bool = true,
+};
+
+pub const MemoryResponseCacheConfig = struct {
+    enabled: bool = false,
+    ttl_minutes: u32 = 60,
+    max_entries: u32 = 5_000,
+};
+
+pub const MemoryReliabilityConfig = struct {
+    rollout_mode: []const u8 = "off",
+    circuit_breaker_failures: u32 = 5,
+    circuit_breaker_cooldown_ms: u32 = 30_000,
+    shadow_hybrid_percent: u32 = 0,
+    canary_hybrid_percent: u32 = 0,
+};
+
+pub const MemoryPostgresConfig = struct {
+    url: []const u8 = "",
+    schema: []const u8 = "public",
+    table: []const u8 = "memories",
+    connect_timeout_secs: u32 = 30,
 };
 
 // ── Tunnel config ───────────────────────────────────────────────

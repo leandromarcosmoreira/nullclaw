@@ -25,6 +25,7 @@ const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
 const SecurityPolicy = @import("../security/policy.zig").SecurityPolicy;
 
+const cache = memory_mod.cache;
 pub const dispatcher = @import("dispatcher.zig");
 pub const compaction = @import("compaction.zig");
 pub const prompt = @import("prompt.zig");
@@ -211,6 +212,8 @@ pub const Agent = struct {
     tools: []const Tool,
     tool_specs: []const ToolSpec,
     mem: ?Memory,
+    session_store: ?memory_mod.SessionStore = null,
+    response_cache: ?*cache.ResponseCache = null,
     /// Optional session scope for memory read/write operations.
     memory_session_id: ?[]const u8 = null,
     observer: Observer,
@@ -600,6 +603,26 @@ pub const Agent = struct {
             .content = enriched,
         });
 
+        // ── Response cache check ──
+        if (self.response_cache) |rc| {
+            var key_buf: [16]u8 = undefined;
+            const system_prompt = if (self.history.items.len > 0 and self.history.items[0].role == .system)
+                self.history.items[0].content
+            else
+                null;
+            const key_hex = cache.ResponseCache.cacheKeyHex(&key_buf, self.model_name, system_prompt, user_message);
+            if (rc.get(self.allocator, key_hex) catch null) |cached_response| {
+                errdefer self.allocator.free(cached_response);
+                const history_copy = try self.allocator.dupe(u8, cached_response);
+                errdefer self.allocator.free(history_copy);
+                try self.history.append(self.allocator, .{
+                    .role = .assistant,
+                    .content = history_copy,
+                });
+                return cached_response;
+            }
+        }
+
         // Record agent event
         const start_event = ObserverEvent{ .llm_request = .{
             .provider = self.provider.getName(),
@@ -868,6 +891,18 @@ pub const Agent = struct {
                 // All borrows have been duped into final_text and history at this point.
                 self.freeResponseFields(&response);
                 self.allocator.free(base_text);
+
+                // ── Cache store (only for direct responses, no tool calls) ──
+                if (self.response_cache) |rc| {
+                    var store_key_buf: [16]u8 = undefined;
+                    const sys_prompt = if (self.history.items.len > 0 and self.history.items[0].role == .system)
+                        self.history.items[0].content
+                    else
+                        null;
+                    const store_key_hex = cache.ResponseCache.cacheKeyHex(&store_key_buf, self.model_name, sys_prompt, user_message);
+                    const token_count: u32 = @intCast(@min(self.last_turn_usage.total_tokens, std.math.maxInt(u32)));
+                    rc.put(self.allocator, store_key_hex, self.model_name, final_text, token_count) catch {};
+                }
 
                 return final_text;
             }

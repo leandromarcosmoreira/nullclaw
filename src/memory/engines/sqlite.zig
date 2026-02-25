@@ -10,7 +10,7 @@
 //! - KV store for settings
 
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
 const MemoryEntry = root.MemoryEntry;
@@ -395,10 +395,7 @@ pub const SqliteMemory = struct {
     }
 
     /// A single persisted message entry (role + content).
-    pub const MessageEntry = struct {
-        role: []const u8,
-        content: []const u8,
-    };
+    pub const MessageEntry = root.MessageEntry;
 
     /// Load all messages for a session, ordered by creation time.
     /// Caller owns the returned slice and all strings within it.
@@ -467,6 +464,39 @@ pub const SqliteMemory = struct {
         }
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.StepFailed;
+    }
+
+    // ── SessionStore vtable ────────────────────────────────────────
+
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.saveMessage(session_id, role, content);
+    }
+
+    fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.loadMessages(allocator, session_id);
+    }
+
+    fn implSessionClearMessages(ptr: *anyopaque, session_id: []const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.clearMessages(session_id);
+    }
+
+    fn implSessionClearAutoSaved(ptr: *anyopaque, session_id: ?[]const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.clearAutoSaved(session_id);
+    }
+
+    const session_vtable = root.SessionStore.VTable{
+        .saveMessage = &implSessionSaveMessage,
+        .loadMessages = &implSessionLoadMessages,
+        .clearMessages = &implSessionClearMessages,
+        .clearAutoSaved = &implSessionClearAutoSaved,
+    };
+
+    pub fn sessionStore(self: *Self) root.SessionStore {
+        return .{ .ptr = @ptrCast(self), .vtable = &session_vtable };
     }
 
     pub fn reindex(self: *Self) !void {
@@ -1584,4 +1614,70 @@ test "sqlite clearAutoSaved no-op on empty" {
     try mem.clearAutoSaved(null);
     const m = mem.memory();
     try std.testing.expectEqual(@as(usize, 0), try m.count());
+}
+
+// ── SessionStore vtable tests ─────────────────────────────────────
+
+test "sqlite sessionStore returns valid vtable" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    const store = mem.sessionStore();
+    try std.testing.expect(store.vtable == &SqliteMemory.session_vtable);
+}
+
+test "sqlite sessionStore saveMessage + loadMessages roundtrip" {
+    const allocator = std.testing.allocator;
+    var mem = try SqliteMemory.init(allocator, ":memory:");
+    defer mem.deinit();
+
+    const store = mem.sessionStore();
+    try store.saveMessage("s1", "user", "hello");
+    try store.saveMessage("s1", "assistant", "hi there");
+
+    const msgs = try store.loadMessages(allocator, "s1");
+    defer root.freeMessages(allocator, msgs);
+
+    try std.testing.expectEqual(@as(usize, 2), msgs.len);
+    try std.testing.expectEqualStrings("user", msgs[0].role);
+    try std.testing.expectEqualStrings("hello", msgs[0].content);
+    try std.testing.expectEqualStrings("assistant", msgs[1].role);
+    try std.testing.expectEqualStrings("hi there", msgs[1].content);
+}
+
+test "sqlite sessionStore clearMessages" {
+    const allocator = std.testing.allocator;
+    var mem = try SqliteMemory.init(allocator, ":memory:");
+    defer mem.deinit();
+
+    const store = mem.sessionStore();
+    try store.saveMessage("s1", "user", "hello");
+    try store.clearMessages("s1");
+
+    const msgs = try store.loadMessages(allocator, "s1");
+    defer allocator.free(msgs);
+    try std.testing.expectEqual(@as(usize, 0), msgs.len);
+}
+
+test "sqlite sessionStore clearAutoSaved" {
+    const allocator = std.testing.allocator;
+    var mem = try SqliteMemory.init(allocator, ":memory:");
+    defer mem.deinit();
+
+    const m = mem.memory();
+    try m.store("autosave_user_1", "auto data", .core, "s1");
+    try m.store("normal_key", "normal data", .core, null);
+
+    const store = mem.sessionStore();
+    try store.clearAutoSaved("s1");
+
+    // autosave entry should be gone
+    const entry = try m.get(allocator, "autosave_user_1");
+    try std.testing.expect(entry == null);
+
+    // normal entry should remain
+    const normal = try m.get(allocator, "normal_key");
+    try std.testing.expect(normal != null);
+    var e = normal.?;
+    defer e.deinit(allocator);
 }

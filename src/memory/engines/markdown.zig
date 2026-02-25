@@ -7,7 +7,7 @@
 //! This backend is append-only: forget() is a no-op to preserve audit trail.
 
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 const Memory = root.Memory;
 const MemoryCategory = root.MemoryCategory;
 const MemoryEntry = root.MemoryEntry;

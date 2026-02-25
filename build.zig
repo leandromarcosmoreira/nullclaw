@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.23";
+    const enable_postgres = b.option(bool, "enable-postgres", "Link libpq for PostgreSQL backend (requires libpq-dev)") orelse false;
 
     const sqlite3_dep = b.dependency("sqlite3", .{
         .target = target,
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
 
     var build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
+    build_options.addOption(bool, "enable_postgres", enable_postgres);
     const build_options_module = build_options.createModule();
 
     // ---------- library module (importable by consumers) ----------
@@ -25,6 +27,9 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod.addImport("build_options", build_options_module);
     lib_mod.linkLibrary(sqlite3);
+    if (enable_postgres) {
+        lib_mod.linkSystemLibrary("pq", .{});
+    }
 
     // ---------- executable ----------
     const exe = b.addExecutable(.{
@@ -42,6 +47,9 @@ pub fn build(b: *std.Build) void {
 
     // Link SQLite on the compile step (not the module)
     exe.linkLibrary(sqlite3);
+    if (enable_postgres) {
+        exe.linkSystemLibrary("pq");
+    }
     exe.dead_strip_dylibs = true;
 
     if (optimize != .Debug) {
@@ -73,6 +81,9 @@ pub fn build(b: *std.Build) void {
     // ---------- tests ----------
     const lib_tests = b.addTest(.{ .root_module = lib_mod });
     lib_tests.linkLibrary(sqlite3);
+    if (enable_postgres) {
+        lib_tests.linkSystemLibrary("pq");
+    }
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
 

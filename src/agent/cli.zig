@@ -121,13 +121,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer tools_mod.deinitTools(allocator, tools);
 
     // Create memory (optional — don't fail if it can't init)
-    var mem_opt: ?Memory = null;
-    const db_path = try std.fs.path.joinZ(allocator, &.{ cfg.workspace_dir, "memory.db" });
-    defer allocator.free(db_path);
-    if (memory_mod.createMemory(allocator, cfg.memory.backend, db_path)) |mem| {
-        mem_opt = mem;
-    } else |_| {}
-    defer if (mem_opt) |m| m.deinit();
+    var mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);
+    defer if (mem_rt) |*rt| rt.deinit();
+    const mem_opt: ?Memory = if (mem_rt) |rt| rt.memory else null;
 
     // Bind memory backend once for this tool set before creating agents.
     tools_mod.bindMemoryTools(tools, mem_opt);
@@ -147,6 +143,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
         agent.policy = &policy;
+        agent.session_store = if (mem_rt) |rt| rt.session_store else null;
+        agent.response_cache = if (mem_rt) |*rt| rt.response_cache else null;
         if (session_id) |sid| {
             agent.memory_session_id = sid;
         }
@@ -228,6 +226,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
     agent.policy = &policy;
+    agent.session_store = if (mem_rt) |rt| rt.session_store else null;
+    agent.response_cache = if (mem_rt) |*rt| rt.response_cache else null;
     if (session_id) |sid| {
         agent.memory_session_id = sid;
     }
