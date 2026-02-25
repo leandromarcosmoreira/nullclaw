@@ -108,21 +108,44 @@ pub fn canonicalProviderName(name: []const u8) []const u8 {
     return name;
 }
 
+fn findProviderInfoByCanonical(name: []const u8) ?ProviderInfo {
+    for (known_providers) |p| {
+        if (std.mem.eql(u8, p.key, name)) return p;
+    }
+    return null;
+}
+
+/// Resolve a provider name used in quick setup.
+/// Accepts aliases (e.g. "grok" -> "xai") and returns provider metadata.
+pub fn resolveProviderForQuickSetup(name: []const u8) ?ProviderInfo {
+    const canonical = canonicalProviderName(name);
+    return findProviderInfoByCanonical(canonical);
+}
+
+pub const ResolveMemoryBackendError = error{
+    UnknownMemoryBackend,
+    MemoryBackendDisabledInBuild,
+};
+
+/// Resolve a memory backend key for quick setup.
+/// Distinguishes "unknown key" from "known but disabled in this build".
+pub fn resolveMemoryBackendForQuickSetup(name: []const u8) ResolveMemoryBackendError!*const memory_root.BackendDescriptor {
+    if (memory_root.findBackend(name)) |desc| return desc;
+    if (memory_root.registry.isKnownBackend(name)) return error.MemoryBackendDisabledInBuild;
+    return error.UnknownMemoryBackend;
+}
+
 /// Get the default model for a provider.
 pub fn defaultModelForProvider(provider: []const u8) []const u8 {
     const canonical = canonicalProviderName(provider);
-    for (known_providers) |p| {
-        if (std.mem.eql(u8, p.key, canonical)) return p.default_model;
-    }
+    if (findProviderInfoByCanonical(canonical)) |p| return p.default_model;
     return "anthropic/claude-sonnet-4.6";
 }
 
 /// Get the environment variable name for a provider's API key.
 pub fn providerEnvVar(provider: []const u8) []const u8 {
     const canonical = canonicalProviderName(provider);
-    for (known_providers) |p| {
-        if (std.mem.eql(u8, p.key, canonical)) return p.env_var;
-    }
+    if (findProviderInfoByCanonical(canonical)) |p| return p.env_var;
     return "API_KEY";
 }
 
@@ -514,17 +537,31 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     defer cfg.deinit();
 
     // Apply overrides
-    if (provider) |p| cfg.default_provider = p;
+    var provider_overridden = false;
+    if (provider) |p| {
+        const info = resolveProviderForQuickSetup(p) orelse return error.UnknownProvider;
+        cfg.default_provider = try cfg.allocator.dupe(u8, info.key);
+        provider_overridden = true;
+    }
     if (api_key) |key| {
         // Store in providers section for the default provider (arena frees old values)
         const entries = try cfg.allocator.alloc(config_mod.ProviderEntry, 1);
-        entries[0] = .{ .name = try cfg.allocator.dupe(u8, cfg.default_provider), .api_key = key };
+        entries[0] = .{
+            .name = try cfg.allocator.dupe(u8, cfg.default_provider),
+            .api_key = try cfg.allocator.dupe(u8, key),
+        };
         cfg.providers = entries;
     }
-    if (memory_backend) |mb| cfg.memory.backend = mb;
+    if (memory_backend) |mb| {
+        const desc = try resolveMemoryBackendForQuickSetup(mb);
+        cfg.memory.backend = desc.name;
+        cfg.memory.auto_save = desc.auto_save_default;
+    }
 
     // Set default model based on provider
-    if (cfg.default_model == null or std.mem.eql(u8, cfg.default_model.?, "anthropic/claude-sonnet-4")) {
+    if (provider_overridden) {
+        cfg.default_model = defaultModelForProvider(cfg.default_provider);
+    } else if (cfg.default_model == null or std.mem.eql(u8, cfg.default_model.?, "anthropic/claude-sonnet-4")) {
         cfg.default_model = defaultModelForProvider(cfg.default_provider);
     }
 
@@ -556,7 +593,8 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     try stdout.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
     try stdout.writeAll("\n  Next steps:\n");
     if (cfg.defaultProviderKey() == null) {
-        try stdout.writeAll("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"\n");
+        const env_hint = providerEnvVar(cfg.default_provider);
+        try stdout.print("    1. Set your API key:  export {s}=\"sk-...\"\n", .{env_hint});
         try stdout.writeAll("    2. Chat:              nullclaw agent -m \"Hello!\"\n");
         try stdout.writeAll("    3. Gateway:           nullclaw gateway\n");
     } else {
@@ -565,6 +603,7 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
         try stdout.writeAll("    3. Status:   nullclaw status\n");
     }
     try stdout.writeAll("\n");
+    try stdout.flush();
 }
 
 /// Main entry point — called from main.zig as `onboard.run(allocator)`.
@@ -1273,6 +1312,49 @@ test "canonicalProviderName passthrough for known providers" {
 test "canonicalProviderName unknown returns as-is" {
     try std.testing.expectEqualStrings("my-custom-provider", canonicalProviderName("my-custom-provider"));
     try std.testing.expectEqualStrings("", canonicalProviderName(""));
+}
+
+test "resolveProviderForQuickSetup handles known and alias names" {
+    const openrouter = resolveProviderForQuickSetup("openrouter") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("openrouter", openrouter.key);
+
+    const grok_alias = resolveProviderForQuickSetup("grok") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("xai", grok_alias.key);
+}
+
+test "resolveProviderForQuickSetup rejects unknown provider" {
+    try std.testing.expect(resolveProviderForQuickSetup("totally-unknown-provider") == null);
+}
+
+test "resolveMemoryBackendForQuickSetup validates enabled, disabled and unknown backends" {
+    // Unknown key should always fail as unknown.
+    try std.testing.expectError(
+        error.UnknownMemoryBackend,
+        resolveMemoryBackendForQuickSetup("totally-unknown-backend"),
+    );
+
+    // Enabled backend resolves to descriptor.
+    if (memory_root.findBackend("markdown")) |desc| {
+        const resolved = try resolveMemoryBackendForQuickSetup("markdown");
+        try std.testing.expectEqualStrings(desc.name, resolved.name);
+    } else {
+        try std.testing.expectError(
+            error.MemoryBackendDisabledInBuild,
+            resolveMemoryBackendForQuickSetup("markdown"),
+        );
+    }
+
+    // If the current build has at least one known-but-disabled backend,
+    // ensure we return the explicit disabled error for it.
+    for (memory_root.registry.known_backend_names) |name| {
+        if (memory_root.findBackend(name) == null) {
+            try std.testing.expectError(
+                error.MemoryBackendDisabledInBuild,
+                resolveMemoryBackendForQuickSetup(name),
+            );
+            return;
+        }
+    }
 }
 
 test "defaultModelForProvider gemini via alias" {
