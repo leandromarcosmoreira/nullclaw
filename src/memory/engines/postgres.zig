@@ -44,11 +44,6 @@ pub fn quoteIdentifier(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 /// Build a query by substituting {schema} and {table} placeholders.
 /// Uses pre-validated, pre-quoted identifiers.
 pub fn buildQuery(allocator: std.mem.Allocator, template: []const u8, schema_q: []const u8, table_q: []const u8) ![]u8 {
-    // Two-pass: first replace {schema}, then {table}
-    const result = try allocator.alloc(u8, template.len + schema_q.len * 4 + table_q.len * 4);
-    allocator.free(result);
-
-    // Use simple find-and-replace
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -190,7 +185,7 @@ const PostgresMemoryImpl = struct {
         errdefer allocator.free(self_.q_clear_auto_sid);
 
         // Run migrations
-        try self_.migrate();
+        try self_.migrate(table);
 
         return self_;
     }
@@ -216,9 +211,11 @@ const PostgresMemoryImpl = struct {
         }
     }
 
-    fn migrate(self: *Self) !void {
-        const ddl = try buildQuery(self.allocator,
-            \\CREATE TABLE IF NOT EXISTS {schema}.{table} (
+    fn migrate(self: *Self, raw_table: []const u8) !void {
+        // raw_table is pre-validated (alphanumeric + underscore only) so safe for index names.
+        // Index names must NOT use quoted identifiers, so we use raw_table directly.
+        const ddl = try std.fmt.allocPrint(self.allocator,
+            \\CREATE TABLE IF NOT EXISTS {s}.{s} (
             \\    id TEXT PRIMARY KEY,
             \\    key TEXT NOT NULL UNIQUE,
             \\    content TEXT NOT NULL,
@@ -227,17 +224,23 @@ const PostgresMemoryImpl = struct {
             \\    created_at TEXT NOT NULL,
             \\    updated_at TEXT NOT NULL
             \\);
-            \\CREATE INDEX IF NOT EXISTS idx_{table}_category ON {schema}.{table}(category);
-            \\CREATE INDEX IF NOT EXISTS idx_{table}_key ON {schema}.{table}(key);
-            \\CREATE INDEX IF NOT EXISTS idx_{table}_session ON {schema}.{table}(session_id);
-            \\CREATE TABLE IF NOT EXISTS {schema}.messages (
+            \\CREATE INDEX IF NOT EXISTS idx_{s}_category ON {s}.{s}(category);
+            \\CREATE INDEX IF NOT EXISTS idx_{s}_key ON {s}.{s}(key);
+            \\CREATE INDEX IF NOT EXISTS idx_{s}_session ON {s}.{s}(session_id);
+            \\CREATE TABLE IF NOT EXISTS {s}.messages (
             \\    id SERIAL PRIMARY KEY,
             \\    session_id TEXT NOT NULL,
             \\    role TEXT NOT NULL,
             \\    content TEXT NOT NULL,
             \\    created_at TIMESTAMP DEFAULT NOW()
             \\);
-        , self.schema_q, self.table_q);
+        , .{
+            self.schema_q, self.table_q,
+            raw_table,     self.schema_q, self.table_q,
+            raw_table,     self.schema_q, self.table_q,
+            raw_table,     self.schema_q, self.table_q,
+            self.schema_q,
+        });
         defer self.allocator.free(ddl);
 
         const result = c.PQexec(self.conn, ddl.ptr);
@@ -303,6 +306,10 @@ const PostgresMemoryImpl = struct {
             .custom => {}, // cat_str is now owned by category.custom
             else => allocator.free(cat_str),
         }
+        errdefer switch (category) {
+            .custom => |name| allocator.free(name),
+            else => {},
+        };
         const timestamp = try dupeResultValue(allocator, result, row, 4);
         errdefer allocator.free(timestamp);
         const session_id = try dupeResultValueOpt(allocator, result, row, 5);
@@ -560,8 +567,9 @@ const PostgresMemoryImpl = struct {
 
         const nrows = c.PQntuples(result);
         var messages = try allocator.alloc(root.MessageEntry, @intCast(nrows));
+        var filled: usize = 0;
         errdefer {
-            for (messages[0..@intCast(nrows)]) |entry| {
+            for (messages[0..filled]) |entry| {
                 allocator.free(entry.role);
                 allocator.free(entry.content);
             }
@@ -575,6 +583,7 @@ const PostgresMemoryImpl = struct {
                 .role = try dupeResultValue(allocator, result, row, 0),
                 .content = try dupeResultValue(allocator, result, row, 1),
             };
+            filled += 1;
         }
 
         return messages;

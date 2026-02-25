@@ -352,13 +352,14 @@ pub const MemoryRuntime = struct {
 
     // Lifecycle: semantic cache (optional, extends response cache with cosine similarity)
     _semantic_cache: ?*semantic_cache.SemanticCache = null,
+    _semantic_cache_db_path: ?[*:0]const u8 = null,
 
     // P3: vector plane components (all optional)
     _embedding_provider: ?embeddings.EmbeddingProvider = null,
     _vector_store: ?vector_store.VectorStore = null,
-    _vector_store_deinit: ?*const fn () void = null,
     _circuit_breaker: ?*circuit_breaker.CircuitBreaker = null,
     _outbox: ?*outbox.VectorOutbox = null,
+    _sidecar_db_path: ?[*:0]const u8 = null,
 
     /// High-level search: uses rollout policy to decide keyword-only vs hybrid.
     pub fn search(self: *MemoryRuntime, allocator: std.mem.Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) ![]RetrievalCandidate {
@@ -521,6 +522,7 @@ pub const MemoryRuntime = struct {
         if (self._vector_store) |vs| {
             vs.deinitStore(); // vtable deinit handles owns_self destroy
         }
+        if (self._sidecar_db_path) |p| self._allocator.free(std.mem.span(p));
         if (self._embedding_provider) |ep| {
             ep.deinit();
         }
@@ -533,6 +535,7 @@ pub const MemoryRuntime = struct {
             sc.deinit();
             self._allocator.destroy(sc);
         }
+        if (self._semantic_cache_db_path) |p| self._allocator.free(std.mem.span(p));
         if (self.response_cache) |rc| {
             rc.deinit();
             self._allocator.destroy(rc);
@@ -661,7 +664,7 @@ pub fn initRuntime(
     var vs_iface: ?vector_store.VectorStore = null;
     var cb_inst: ?*circuit_breaker.CircuitBreaker = null;
     var outbox_inst: ?*outbox.VectorOutbox = null;
-
+    var sidecar_db_path: ?[*:0]const u8 = null;
     if (!std.mem.eql(u8, config.search.provider, "none") and config.search.query.hybrid.enabled) vec_plane: {
         // 1. Create EmbeddingProvider (with optional fallback via ProviderRouter)
         const primary_ep = embeddings.createEmbeddingProvider(
@@ -727,10 +730,10 @@ pub fn initRuntime(
         } else if (std.mem.eql(u8, store_kind, "pgvector")) {
             // pgvector via PostgreSQL
             if (build_options.enable_postgres) {
-                const pg_url = if (config.postgres.connection_url.len > 0)
-                    config.postgres.connection_url
+                const pg_url = if (config.postgres.url.len > 0)
+                    config.postgres.url
                 else {
-                    log.warn("vector store kind 'pgvector' requires postgres.connection_url to be set", .{});
+                    log.warn("vector store kind 'pgvector' requires postgres.url to be set", .{});
                     break :vec_plane;
                 };
                 const pgvs = store_pgvector.PgvectorVectorStore.init(allocator, .{
@@ -780,6 +783,7 @@ pub fn initRuntime(
                 vs.owns_self = true;
                 vs_iface = vs.store();
                 db_handle_for_outbox = vs.db; // sidecar's own db for outbox
+                sidecar_db_path = sidecar_path;
             }
         }
 
@@ -815,6 +819,16 @@ pub fn initRuntime(
     if (std.mem.eql(u8, config.reliability.fallback_policy, "fail_fast")) {
         if (!std.mem.eql(u8, config.search.provider, "none") and config.search.query.hybrid.enabled and vs_iface == null) {
             log.warn("fallback_policy=fail_fast: vector plane init failed, aborting runtime creation", .{});
+            // Clean up partially-created P3 resources
+            if (embed_provider) |ep| ep.deinit();
+            if (cb_inst) |cb| allocator.destroy(cb);
+            if (sidecar_db_path) |p| allocator.free(std.mem.span(p));
+            // Clean up response cache
+            if (resp_cache) |rc| {
+                rc.deinit();
+                allocator.destroy(rc);
+            }
+            if (cache_db_path) |p| allocator.free(std.mem.span(p));
             if (engine) |eng| {
                 eng.deinit();
                 allocator.destroy(eng);
@@ -830,6 +844,7 @@ pub fn initRuntime(
 
     // ── Lifecycle: semantic cache ──
     var sem_cache: ?*semantic_cache.SemanticCache = null;
+    var sem_cache_db_path: ?[*:0]const u8 = null;
     if (config.response_cache.enabled and embed_provider != null) sem_cache_blk: {
         const sc_path = std.fs.path.joinZ(allocator, &.{ workspace_dir, "semantic_cache.db" }) catch break :sem_cache_blk;
         const sc = allocator.create(semantic_cache.SemanticCache) catch {
@@ -848,7 +863,7 @@ pub fn initRuntime(
             break :sem_cache_blk;
         };
         sem_cache = sc;
-        // Note: sc_path is owned by the semantic cache's sqlite connection
+        sem_cache_db_path = sc_path.ptr;
     }
 
     // ── Lifecycle: summarizer config ──
@@ -913,10 +928,12 @@ pub fn initRuntime(
         ._rollout_policy = rollout.RolloutPolicy.init(config.reliability),
         ._summarizer_cfg = summarizer_cfg,
         ._semantic_cache = sem_cache,
+        ._semantic_cache_db_path = sem_cache_db_path,
         ._embedding_provider = embed_provider,
         ._vector_store = vs_iface,
         ._circuit_breaker = cb_inst,
         ._outbox = outbox_inst,
+        ._sidecar_db_path = sidecar_db_path,
     };
 }
 

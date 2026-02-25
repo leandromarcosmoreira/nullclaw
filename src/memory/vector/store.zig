@@ -333,6 +333,15 @@ pub const SqliteSidecarVectorStore = struct {
 
     // Reuse shared vtable methods (same db schema, same struct layout).
     // Only deinit differs: sidecar closes its own db handle.
+    // Safety: both structs must have `db` and `allocator` at the same offsets.
+    comptime {
+        const shared_db = @offsetOf(SqliteSharedVectorStore, "db");
+        const shared_alloc = @offsetOf(SqliteSharedVectorStore, "allocator");
+        const sidecar_db = @offsetOf(SqliteSidecarVectorStore, "db");
+        const sidecar_alloc = @offsetOf(SqliteSidecarVectorStore, "allocator");
+        if (shared_db != sidecar_db) @compileError("db field offset mismatch between Shared and Sidecar");
+        if (shared_alloc != sidecar_alloc) @compileError("allocator field offset mismatch between Shared and Sidecar");
+    }
     const sidecar_vtable = VectorStore.VTable{
         .upsert = SqliteSharedVectorStore.vtable_instance.upsert,
         .search = SqliteSharedVectorStore.vtable_instance.search,

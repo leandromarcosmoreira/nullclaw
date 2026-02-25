@@ -242,10 +242,13 @@ pub const LanceDbMemory = struct {
         _ = c.sqlite3_bind_text(stmt, 7, now.ptr, @intCast(now.len), SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 8, now.ptr, @intCast(now.len), SQLITE_STATIC);
 
+        // session_id binding — must outlive sqlite3_step, so allocate outside the if block
+        var sid_z: ?[:0]u8 = null;
+        defer if (sid_z) |sz| self_.allocator.free(sz);
+
         if (session_id) |sid| {
-            const sid_z = try self_.allocator.dupeZ(u8, sid);
-            defer self_.allocator.free(sid_z);
-            _ = c.sqlite3_bind_text(stmt, 9, sid_z.ptr, @intCast(sid_z.len), SQLITE_STATIC);
+            sid_z = try self_.allocator.dupeZ(u8, sid);
+            _ = c.sqlite3_bind_text(stmt, 9, sid_z.?.ptr, @intCast(sid_z.?.len), SQLITE_STATIC);
         } else {
             _ = c.sqlite3_bind_null(stmt, 9);
         }
@@ -282,7 +285,10 @@ pub const LanceDbMemory = struct {
 
         const Scored = struct { entry: MemoryEntry, score: f32 };
         var scored: std.ArrayListUnmanaged(Scored) = .{};
-        defer scored.deinit(allocator);
+        errdefer {
+            for (scored.items) |*s| s.entry.deinit(allocator);
+            scored.deinit(allocator);
+        }
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             // Get embedding
@@ -338,7 +344,7 @@ pub const LanceDbMemory = struct {
 
         // Take top-k
         const take = @min(scored.items.len, limit);
-        var result = try allocator.alloc(MemoryEntry, take);
+        const result = try allocator.alloc(MemoryEntry, take);
         for (0..take) |i| {
             result[i] = scored.items[i].entry;
         }
@@ -346,6 +352,8 @@ pub const LanceDbMemory = struct {
         for (take..scored.items.len) |i| {
             scored.items[i].entry.deinit(allocator);
         }
+        // Clear scored without freeing moved entries (defer only frees the backing array)
+        scored.clearAndFree(allocator);
 
         return result;
     }
@@ -353,9 +361,6 @@ pub const LanceDbMemory = struct {
     fn textRecall(self_: *Self, db: *c.sqlite3, allocator: std.mem.Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) ![]MemoryEntry {
         _ = self_;
         _ = session_id; // TODO: add session filter
-
-        const query_z = try allocator.dupeZ(u8, query);
-        defer allocator.free(query_z);
 
         const like_pattern = try std.fmt.allocPrint(allocator, "%{s}%", .{query});
         defer allocator.free(like_pattern);
@@ -369,7 +374,10 @@ pub const LanceDbMemory = struct {
         _ = c.sqlite3_bind_int(stmt, 2, @intCast(limit));
 
         var results: std.ArrayListUnmanaged(MemoryEntry) = .{};
-        defer results.deinit(allocator);
+        errdefer {
+            for (results.items) |*e| e.deinit(allocator);
+            results.deinit(allocator);
+        }
 
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const key_ptr = c.sqlite3_column_text(stmt, 0);
@@ -399,7 +407,8 @@ pub const LanceDbMemory = struct {
             });
         }
 
-        return try allocator.dupe(MemoryEntry, results.items);
+        const owned = try results.toOwnedSlice(allocator);
+        return owned;
     }
 
     fn implGet(ptr: *anyopaque, allocator: std.mem.Allocator, key: []const u8) anyerror!?MemoryEntry {
@@ -453,7 +462,10 @@ pub const LanceDbMemory = struct {
         _ = session_id; // TODO: filter by session
 
         var results: std.ArrayListUnmanaged(MemoryEntry) = .{};
-        defer results.deinit(allocator);
+        errdefer {
+            for (results.items) |*e| e.deinit(allocator);
+            results.deinit(allocator);
+        }
 
         const sql = if (category != null) "SELECT key, text, category, created_at FROM lancedb_memories WHERE category = ?1 ORDER BY created_at DESC" else "SELECT key, text, category, created_at FROM lancedb_memories ORDER BY created_at DESC";
 
@@ -498,7 +510,7 @@ pub const LanceDbMemory = struct {
             });
         }
 
-        return try allocator.dupe(MemoryEntry, results.items);
+        return try results.toOwnedSlice(allocator);
     }
 
     fn implForget(ptr: *anyopaque, key: []const u8) anyerror!bool {

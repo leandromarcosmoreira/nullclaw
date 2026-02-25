@@ -1110,7 +1110,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         self.memory.reliability.canary_hybrid_percent = @intCast(v.integer);
                     };
                     if (rel.get("fallback_policy")) |v| if (v == .string) {
-                        self.memory.reliability.fallback_policy = v.string;
+                        self.memory.reliability.fallback_policy = try self.allocator.dupe(u8, v.string);
                     };
                 }
             }

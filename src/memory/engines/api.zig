@@ -129,11 +129,10 @@ pub const ApiMemory = struct {
 
     fn buildMemoryUrlWithQuery(self: *const Self, alloc: Allocator, category: ?[]const u8, session_id: ?[]const u8) ![]u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(alloc);
+        errdefer buf.deinit(alloc);
 
-        const prefix = try std.fmt.allocPrint(alloc, "{s}/memories", .{self.base_url});
-        defer alloc.free(prefix);
-        try buf.appendSlice(alloc, prefix);
+        try buf.appendSlice(alloc, self.base_url);
+        try buf.appendSlice(alloc, "/memories");
 
         var has_param = false;
         if (category) |cat| {
@@ -148,7 +147,7 @@ pub const ApiMemory = struct {
             try buf.appendSlice(alloc, sid);
         }
 
-        return alloc.dupe(u8, buf.items);
+        return buf.toOwnedSlice(alloc);
     }
 
     fn buildSearchUrl(self: *const Self, alloc: Allocator) ![]u8 {
@@ -178,7 +177,7 @@ pub const ApiMemory = struct {
 
     fn buildStorePayload(alloc: Allocator, content: []const u8, category: MemoryCategory, session_id: ?[]const u8) ![]u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(alloc);
+        errdefer buf.deinit(alloc);
 
         try buf.appendSlice(alloc, "{\"content\":\"");
         try appendJsonEscaped(&buf, alloc, content);
@@ -195,12 +194,12 @@ pub const ApiMemory = struct {
         }
 
         try buf.append(alloc, '}');
-        return alloc.dupe(u8, buf.items);
+        return buf.toOwnedSlice(alloc);
     }
 
     fn buildSearchPayload(alloc: Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) ![]u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(alloc);
+        errdefer buf.deinit(alloc);
 
         try buf.appendSlice(alloc, "{\"query\":\"");
         try appendJsonEscaped(&buf, alloc, query);
@@ -218,19 +217,19 @@ pub const ApiMemory = struct {
         }
 
         try buf.append(alloc, '}');
-        return alloc.dupe(u8, buf.items);
+        return buf.toOwnedSlice(alloc);
     }
 
     fn buildMessagePayload(alloc: Allocator, role: []const u8, content: []const u8) ![]u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(alloc);
+        errdefer buf.deinit(alloc);
 
         try buf.appendSlice(alloc, "{\"role\":\"");
         try appendJsonEscaped(&buf, alloc, role);
         try buf.appendSlice(alloc, "\",\"content\":\"");
         try appendJsonEscaped(&buf, alloc, content);
         try buf.appendSlice(alloc, "\"}");
-        return alloc.dupe(u8, buf.items);
+        return buf.toOwnedSlice(alloc);
     }
 
     fn appendJsonEscaped(buf: *std.ArrayListUnmanaged(u8), alloc: Allocator, text: []const u8) !void {
@@ -282,9 +281,7 @@ pub const ApiMemory = struct {
             try results.append(alloc, entry);
         }
 
-        const out = try alloc.dupe(MemoryEntry, results.items);
-        results.deinit(alloc);
-        return out;
+        return results.toOwnedSlice(alloc);
     }
 
     fn parseSingleEntry(alloc: Allocator, body: []const u8) !?MemoryEntry {
@@ -335,6 +332,10 @@ pub const ApiMemory = struct {
             .custom => .{ .custom = try alloc.dupe(u8, cat_str) },
             else => category,
         };
+        errdefer switch (final_category) {
+            .custom => |name| alloc.free(name),
+            else => {},
+        };
 
         var session_id: ?[]const u8 = null;
         if (obj.get("session_id")) |v| {
@@ -345,6 +346,7 @@ pub const ApiMemory = struct {
                 else => {},
             }
         }
+        errdefer if (session_id) |sid| alloc.free(sid);
 
         var score: ?f64 = null;
         if (obj.get("score")) |v| {
@@ -414,15 +416,16 @@ pub const ApiMemory = struct {
                 else => continue,
             } else continue;
 
+            const duped_role = try alloc.dupe(u8, role);
+            errdefer alloc.free(duped_role);
+            const duped_content = try alloc.dupe(u8, content);
             try results.append(alloc, .{
-                .role = try alloc.dupe(u8, role),
-                .content = try alloc.dupe(u8, content),
+                .role = duped_role,
+                .content = duped_content,
             });
         }
 
-        const out = try alloc.dupe(MessageEntry, results.items);
-        results.deinit(alloc);
-        return out;
+        return results.toOwnedSlice(alloc);
     }
 
     fn parseCount(alloc: Allocator, body: []const u8) !usize {

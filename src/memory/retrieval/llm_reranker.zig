@@ -221,8 +221,8 @@ pub fn reorderCandidates(
 
 // ── Tests ────────────────────────────────────────────────────────
 
-fn makeCandidate(id_suffix: u8, content: []const u8, score: f64) RetrievalCandidate {
-    const ids = [_]u8{ 'c', id_suffix };
+fn makeCandidate(comptime id_suffix: u8, content: []const u8, score: f64) RetrievalCandidate {
+    const ids = comptime [_]u8{ 'c', id_suffix };
     return .{
         .id = &ids,
         .key = &ids,
@@ -236,6 +236,7 @@ fn makeCandidate(id_suffix: u8, content: []const u8, score: f64) RetrievalCandid
         .source_path = "",
         .start_line = 0,
         .end_line = 0,
+        .created_at = 0,
     };
 }
 

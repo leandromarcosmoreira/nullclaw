@@ -48,9 +48,6 @@ pub fn readBrainDb(
         cols.category_expr,
     }) catch return error.QueryFailed;
 
-    // Validate content column was found
-    if (std.mem.eql(u8, cols.content_col, "")) return error.NoContentColumn;
-
     var stmt: ?*c.sqlite3_stmt = null;
     rc = c.sqlite3_prepare_v2(db.?, query.ptr, @intCast(query.len), &stmt, null);
     if (rc != c.SQLITE_OK) return error.QueryFailed;

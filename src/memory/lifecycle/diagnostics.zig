@@ -139,7 +139,7 @@ pub fn diagnose(rt: *root.MemoryRuntime) DiagnosticReport {
 /// Caller owns the returned slice.
 pub fn formatReport(report: DiagnosticReport, allocator: std.mem.Allocator) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
+    errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
     try w.writeAll("=== Memory Doctor ===\n\n");
@@ -201,7 +201,7 @@ pub fn formatReport(report: DiagnosticReport, allocator: std.mem.Allocator) ![]u
     try std.fmt.format(w, "  summarizer:       {}\n", .{report.summarizer_enabled});
     try std.fmt.format(w, "  semantic_cache:   {}\n", .{report.semantic_cache_active});
 
-    return try allocator.dupe(u8, buf.items);
+    return try buf.toOwnedSlice(allocator);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

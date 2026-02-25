@@ -220,6 +220,7 @@ pub const SemanticCache = struct {
             const sim = vector_math.cosineSimilarity(query_emb, cached_emb);
             if (sim > best_sim and sim >= self.similarity_threshold) {
                 if (best_response) |br| allocator.free(br);
+                best_response = null;
 
                 const resp_raw = c.sqlite3_column_text(stmt.?, 1);
                 const resp_len: usize = @intCast(c.sqlite3_column_bytes(stmt.?, 1));

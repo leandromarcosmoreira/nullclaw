@@ -478,16 +478,11 @@ pub const RedisMemory = struct {
         const self_: *Self = @ptrCast(@alignCast(ptr));
 
         // Determine which set to query
-        var set_key: []u8 = undefined;
-        var set_key_owned = false;
-        if (category) |cat| {
-            set_key = try self_.prefixedKey("cat", cat.toString());
-            set_key_owned = true;
-        } else {
-            set_key = try self_.prefixedSimple("keys");
-            set_key_owned = true;
-        }
-        defer if (set_key_owned) self_.allocator.free(set_key);
+        const set_key = if (category) |cat|
+            try self_.prefixedKey("cat", cat.toString())
+        else
+            try self_.prefixedSimple("keys");
+        defer self_.allocator.free(set_key);
 
         var keys_resp = try self_.sendCommandAlloc(allocator, &.{ "SMEMBERS", set_key });
         defer keys_resp.deinit(allocator);

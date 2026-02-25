@@ -102,8 +102,9 @@ pub fn freeCandidates(allocator: Allocator, candidates: []RetrievalCandidate) vo
 /// Caller owns the returned slice. Entries are NOT freed.
 pub fn entriesToCandidates(allocator: Allocator, entries: []const MemoryEntry) ![]RetrievalCandidate {
     var result = try allocator.alloc(RetrievalCandidate, entries.len);
+    var initialized: usize = 0;
     errdefer {
-        for (result) |*c| c.deinit(allocator);
+        for (result[0..initialized]) |*c| c.deinit(allocator);
         allocator.free(result);
     }
 
@@ -143,6 +144,7 @@ pub fn entriesToCandidates(allocator: Allocator, entries: []const MemoryEntry) !
             .end_line = 0,
             .created_at = created_at,
         };
+        initialized += 1;
     }
 
     return result;
@@ -459,49 +461,30 @@ pub const RetrievalEngine = struct {
             valid_count += 1;
         }
 
-        // Count including vector candidates
-        const total_valid = valid_count;
-        _ = total_valid;
-
         // Single source with results → set final_score from keyword_rank, skip RRF
         if (valid_count <= 1 and (vector_candidates == null or vector_candidates.?.len == 0)) {
             // Find the one with results
-            for (source_results) |sr| {
+            for (source_results, 0..) |sr, sri| {
                 if (sr.len > 0) {
                     const out_len = sr.len;
                     var result = try allocator.alloc(RetrievalCandidate, out_len);
                     errdefer allocator.free(result);
 
-                    var actual_len: usize = 0;
                     for (0..out_len) |j| {
                         const score = if (sr[j].keyword_rank) |rank|
                             1.0 / @as(f64, @floatFromInt(rank + self.merge_k))
                         else
                             1.0 / @as(f64, @floatFromInt(j + 1 + self.merge_k));
 
-                        result[actual_len] = sr[j];
-                        result[actual_len].final_score = score;
-                        // Zero out the source entry so it doesn't get freed in defer
-                        sr[j] = .{
-                            .id = "",
-                            .key = "",
-                            .content = "",
-                            .snippet = "",
-                            .category = .core,
-                            .keyword_rank = null,
-                            .vector_score = null,
-                            .final_score = 0.0,
-                            .source = "",
-                            .source_path = "",
-                            .start_line = 0,
-                            .end_line = 0,
-                        };
-                        actual_len += 1;
+                        result[j] = sr[j];
+                        result[j].final_score = score;
                     }
 
-                    if (actual_len < result.len) {
-                        result = allocator.realloc(result, actual_len) catch result[0..actual_len];
-                    }
+                    // Ownership of individual candidates moved to result.
+                    // Free only the source slice (not entries) and mark it empty
+                    // so the defer block skips it.
+                    allocator.free(sr);
+                    source_results[sri] = &.{};
 
                     // Apply pipeline stages 4-8
                     var merged = result;
@@ -651,9 +634,9 @@ fn applyMinRelevance(allocator: Allocator, candidates: []RetrievalCandidate, min
     var merged = candidates;
     if (min_score > 0.0) {
         var keep: usize = 0;
-        for (merged) |*ca| {
+        for (merged, 0..) |*ca, idx| {
             if (ca.final_score >= min_score) {
-                if (keep != @as(usize, @intFromPtr(ca) -% @intFromPtr(merged.ptr)) / @sizeOf(RetrievalCandidate)) {
+                if (keep != idx) {
                     merged[keep] = ca.*;
                 }
                 keep += 1;

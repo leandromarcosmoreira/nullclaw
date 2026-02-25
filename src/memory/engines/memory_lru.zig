@@ -141,11 +141,26 @@ pub const InMemoryLruMemory = struct {
         const ts2 = try self_.allocator.dupe(u8, ts);
         errdefer self_.allocator.free(ts2);
 
+        const stored_key = try self_.allocator.dupe(u8, key);
+        errdefer self_.allocator.free(stored_key);
+
+        const stored_content = try self_.allocator.dupe(u8, content);
+        errdefer self_.allocator.free(stored_content);
+
+        const stored_cat = try self_.dupCategory(category);
+        errdefer switch (stored_cat) {
+            .custom => |name| self_.allocator.free(name),
+            else => {},
+        };
+
+        const stored_sid = if (session_id) |sid| try self_.allocator.dupe(u8, sid) else null;
+        errdefer if (stored_sid) |sid| self_.allocator.free(sid);
+
         const stored = StoredEntry{
-            .key = try self_.allocator.dupe(u8, key),
-            .content = try self_.allocator.dupe(u8, content),
-            .category = try self_.dupCategory(category),
-            .session_id = if (session_id) |sid| try self_.allocator.dupe(u8, sid) else null,
+            .key = stored_key,
+            .content = stored_content,
+            .category = stored_cat,
+            .session_id = stored_sid,
             .created_at = ts,
             .updated_at = ts2,
             .last_access = self_.nextAccess(),
@@ -188,22 +203,38 @@ pub const InMemoryLruMemory = struct {
 
         const result_len = @min(matches.items.len, limit);
         const results = try allocator.alloc(MemoryEntry, result_len);
-        errdefer allocator.free(results);
+        var filled: usize = 0;
+        errdefer {
+            for (results[0..filled]) |*e| e.deinit(allocator);
+            allocator.free(results);
+        }
 
         for (results, 0..) |*slot, i| {
             const src = matches.items[i].entry;
+            const id = try allocator.dupe(u8, src.key);
+            errdefer allocator.free(id);
+            const dup_key = try allocator.dupe(u8, src.key);
+            errdefer allocator.free(dup_key);
+            const dup_content = try allocator.dupe(u8, src.content);
+            errdefer allocator.free(dup_content);
+            const dup_cat: MemoryCategory = switch (src.category) {
+                .custom => |name| .{ .custom = try allocator.dupe(u8, name) },
+                else => src.category,
+            };
+            const dup_ts = try allocator.dupe(u8, src.updated_at);
+            errdefer allocator.free(dup_ts);
+            const dup_sid = if (src.session_id) |sid| try allocator.dupe(u8, sid) else null;
+
             slot.* = .{
-                .id = try allocator.dupe(u8, src.key),
-                .key = try allocator.dupe(u8, src.key),
-                .content = try allocator.dupe(u8, src.content),
-                .category = switch (src.category) {
-                    .custom => |name| .{ .custom = try allocator.dupe(u8, name) },
-                    else => src.category,
-                },
-                .timestamp = try allocator.dupe(u8, src.updated_at),
-                .session_id = if (src.session_id) |sid| try allocator.dupe(u8, sid) else null,
+                .id = id,
+                .key = dup_key,
+                .content = dup_content,
+                .category = dup_cat,
+                .timestamp = dup_ts,
+                .session_id = dup_sid,
                 .score = null,
             };
+            filled += 1;
         }
 
         return results;

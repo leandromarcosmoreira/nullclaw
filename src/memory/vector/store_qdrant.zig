@@ -89,12 +89,8 @@ pub const QdrantVectorStore = struct {
         extra_headers_buf[header_count] = .{ .name = "Content-Type", .value = "application/json" };
         header_count += 1;
 
-        var auth_header: ?[]u8 = null;
-        defer if (auth_header) |h| alloc.free(h);
-
         if (self.api_key) |key| {
-            auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{key});
-            extra_headers_buf[header_count] = .{ .name = "api-key", .value = auth_header.? };
+            extra_headers_buf[header_count] = .{ .name = "api-key", .value = key };
             header_count += 1;
         }
 
@@ -112,14 +108,42 @@ pub const QdrantVectorStore = struct {
         return .{ .status = result.status, .body = body };
     }
 
+    // ── Helpers ────────────────────────────────────────────────────
+
+    /// Derive a deterministic UUID (v5-style) from a key string.
+    /// Qdrant point IDs must be valid UUIDs or integers — arbitrary strings are rejected.
+    fn keyToUuid(key: []const u8) [36]u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(key, &digest, .{});
+        // Format as UUID: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
+        // Set version nibble to 5 and variant bits to 10xx
+        digest[6] = (digest[6] & 0x0f) | 0x50; // version 5
+        digest[8] = (digest[8] & 0x3f) | 0x80; // variant 10xx
+        var uuid: [36]u8 = undefined;
+        const hex = "0123456789abcdef";
+        var out: usize = 0;
+        for (0..16) |i| {
+            if (i == 4 or i == 6 or i == 8 or i == 10) {
+                uuid[out] = '-';
+                out += 1;
+            }
+            uuid[out] = hex[digest[i] >> 4];
+            out += 1;
+            uuid[out] = hex[digest[i] & 0x0f];
+            out += 1;
+        }
+        return uuid;
+    }
+
     // ── JSON builders ─────────────────────────────────────────────
 
     fn buildUpsertPayload(alloc: Allocator, key: []const u8, embedding: []const f32) ![]u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(alloc);
 
+        const uuid = keyToUuid(key);
         try buf.appendSlice(alloc, "{\"points\":[{\"id\":\"");
-        try appendJsonEscaped(&buf, alloc, key);
+        try buf.appendSlice(alloc, &uuid);
         try buf.appendSlice(alloc, "\",\"vector\":[");
         for (embedding, 0..) |val, i| {
             if (i > 0) try buf.append(alloc, ',');
@@ -472,12 +496,18 @@ test "buildUpsertPayload generates valid JSON" {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
     defer parsed.deinit();
 
-    // Verify structure: {"points":[{"id":"test_key","vector":[...],"payload":{"key":"test_key"}}]}
+    // Verify structure: {"points":[{"id":"<uuid>","vector":[...],"payload":{"key":"test_key"}}]}
     const points = parsed.value.object.get("points").?.array;
     try std.testing.expectEqual(@as(usize, 1), points.items.len);
 
     const point = points.items[0].object;
-    try std.testing.expectEqualStrings("test_key", point.get("id").?.string);
+    // id is now a deterministic UUID derived from key, verify it's a valid UUID format (36 chars with dashes)
+    const id_str = point.get("id").?.string;
+    try std.testing.expectEqual(@as(usize, 36), id_str.len);
+    try std.testing.expect(id_str[8] == '-');
+    try std.testing.expect(id_str[13] == '-');
+    try std.testing.expect(id_str[18] == '-');
+    try std.testing.expect(id_str[23] == '-');
 
     const vec = point.get("vector").?.array;
     try std.testing.expectEqual(@as(usize, 3), vec.items.len);
@@ -498,7 +528,11 @@ test "buildUpsertPayload escapes special characters" {
 
     const points = parsed.value.object.get("points").?.array;
     const point = points.items[0].object;
-    try std.testing.expectEqualStrings("key\"with\\quotes", point.get("id").?.string);
+    // id is a UUID (special chars are hashed away), payload key preserves the original
+    const id_str = point.get("id").?.string;
+    try std.testing.expectEqual(@as(usize, 36), id_str.len);
+    const pl = point.get("payload").?.object;
+    try std.testing.expectEqualStrings("key\"with\\quotes", pl.get("key").?.string);
 }
 
 test "buildSearchPayload generates valid JSON" {
@@ -668,4 +702,30 @@ test "buildUrl with empty path" {
     defer std.testing.allocator.free(url);
 
     try std.testing.expectEqualStrings("http://localhost:6333/collections/test", url);
+}
+
+test "keyToUuid produces valid UUID format" {
+    const uuid = QdrantVectorStore.keyToUuid("test_key");
+    try std.testing.expectEqual(@as(usize, 36), uuid.len);
+    // Check dash positions
+    try std.testing.expect(uuid[8] == '-');
+    try std.testing.expect(uuid[13] == '-');
+    try std.testing.expect(uuid[18] == '-');
+    try std.testing.expect(uuid[23] == '-');
+    // Check version nibble (position 14) is '5'
+    try std.testing.expect(uuid[14] == '5');
+    // Check variant nibble (position 19) is 8, 9, a, or b
+    try std.testing.expect(uuid[19] == '8' or uuid[19] == '9' or uuid[19] == 'a' or uuid[19] == 'b');
+}
+
+test "keyToUuid is deterministic" {
+    const uuid_a = QdrantVectorStore.keyToUuid("hello");
+    const uuid_b = QdrantVectorStore.keyToUuid("hello");
+    try std.testing.expectEqualSlices(u8, &uuid_a, &uuid_b);
+}
+
+test "keyToUuid differs for different keys" {
+    const uuid_a = QdrantVectorStore.keyToUuid("alpha");
+    const uuid_b = QdrantVectorStore.keyToUuid("beta");
+    try std.testing.expect(!std.mem.eql(u8, &uuid_a, &uuid_b));
 }

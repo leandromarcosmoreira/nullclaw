@@ -134,7 +134,9 @@ fn archiveOldFiles(allocator: std.mem.Allocator, config: HygieneConfig) !u64 {
 
         std.fs.cwd().rename(src_path, dst_path) catch {
             // Fallback: try copy + delete
-            memory_dir.copyFile(name, std.fs.cwd().openDir(archive_path, .{}) catch continue, name, .{}) catch continue;
+            var dest_dir = std.fs.cwd().openDir(archive_path, .{}) catch continue;
+            defer dest_dir.close();
+            memory_dir.copyFile(name, dest_dir, name, .{}) catch continue;
             memory_dir.deleteFile(name) catch {};
         };
         moved += 1;

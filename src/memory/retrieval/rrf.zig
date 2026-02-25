@@ -62,10 +62,15 @@ pub fn rrfMerge(
     // Truncate and build output
     const out_len = @min(merged.items.len, limit);
     var result = try allocator.alloc(RetrievalCandidate, out_len);
-    errdefer allocator.free(result);
+    var cloned: usize = 0;
+    errdefer {
+        for (result[0..cloned]) |*c| c.deinit(allocator);
+        allocator.free(result);
+    }
 
     for (0..out_len) |i| {
         result[i] = try cloneCandidate(allocator, merged.items[i].candidate, merged.items[i].score);
+        cloned += 1;
     }
 
     return result;
@@ -88,14 +93,16 @@ fn compareByScoreDesc(_: void, a: MergeItem, b: MergeItem) bool {
 fn singleSourceCopy(allocator: Allocator, source: []const RetrievalCandidate, k: u32, limit: usize) ![]RetrievalCandidate {
     const out_len = @min(source.len, limit);
     var result = try allocator.alloc(RetrievalCandidate, out_len);
+    var cloned: usize = 0;
     errdefer {
-        for (result[0..out_len]) |*c| c.deinit(allocator);
+        for (result[0..cloned]) |*c| c.deinit(allocator);
         allocator.free(result);
     }
 
     for (0..out_len) |i| {
         const rrf_score = 1.0 / @as(f64, @floatFromInt(i + 1 + k));
         result[i] = try cloneCandidate(allocator, source[i], rrf_score);
+        cloned += 1;
     }
 
     return result;
