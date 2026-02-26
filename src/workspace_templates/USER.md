@@ -1,18 +1,17 @@
+# USER.md — Sobre Seu Humano
 
-# USER.md - About Your Human
+*Aprenda sobre a pessoa que você está ajudando. Atualize isso com o tempo.*
 
-_Learn about the person you're helping. Update this as you go._
+- **Nome:**
+- **Como chamá-los:**
+- **Pronomes:** *(opcional)*
+- **Fuso horário:**
+- **Notas:**
 
-- **Name:**
-- **What to call them:**
-- **Pronouns:** _(optional)_
-- **Timezone:**
-- **Notes:**
+## Contexto
 
-## Context
-
-_(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_
+*(Com o que eles se importam? Em quais projetos estão trabalhando? O que os irrita? O que os faz rir? Construa isso com o tempo.)*
 
 ---
 
-The more you know, the better you can help. But remember — you're learning about a person, not building a dossier. Respect the difference.
+Quanto mais você souber, melhor poderá ajudar. Mas lembre-se — você está aprendendo sobre uma pessoa, não construindo um dossiê. Respeite a diferença.

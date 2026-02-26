@@ -1,17 +1,17 @@
-# Security Policy
+# Política de Segurança
 
-## Reporting a Vulnerability
+## Relatando uma Vulnerabilidade
 
-If you discover a security vulnerability in nullclaw, please report it responsibly:
+Se você descobrir uma vulnerabilidade de segurança no nullclaw, por favor, relate-a de forma responsável:
 
-1. **Do not** open a public issue
-2. Use [GitHub private vulnerability reporting](https://github.com/nullclaw/nullclaw/security/advisories/new)
+1. **Não** abra uma issue pública.
+2. Use o [relatório de vulnerabilidades privadas do GitHub](https://github.com/nullclaw/nullclaw/security/advisories/new)
 
-We will respond within 48 hours and work on a fix promptly.
+Responderemos em até 48 horas e trabalharemos em uma correção prontamente.
 
-## Supported Versions
+## Versões Suportadas
 
-| Version | Supported |
+| Versão | Suportada |
 |---------|-----------|
-| Latest release | Yes |
-| Older releases | No |
+| Último lançamento | Sim |
+| Lançamentos antigos | Não |
