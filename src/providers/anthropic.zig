@@ -876,7 +876,7 @@ test "buildStreamingChatRequestBody contains stream true" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
 }
 
-test "buildChatRequestBody defaults max_tokens to OpenClaw-aligned fallback" {
+test "buildChatRequestBody defaults max_tokens to runtime fallback" {
     const allocator = std.testing.allocator;
     const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
     const req = root.ChatRequest{ .messages = &msgs };

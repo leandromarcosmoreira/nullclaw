@@ -438,7 +438,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
         }
     }
 
-    // Agent bindings (OpenClaw-style key, snake_case payload fields).
+    // Agent bindings (snake_case payload fields).
     const bindings_src = root.get("bindings");
     if (bindings_src) |bindings_val| {
         if (bindings_val == .array) {

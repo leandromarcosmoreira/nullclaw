@@ -50,16 +50,13 @@ const WorkspaceOnboardingState = struct {
     }
 };
 
-const OPENCLAW_AGENTS_TEMPLATE = @embedFile("workspace_templates/AGENTS.md");
-const OPENCLAW_SOUL_TEMPLATE = @embedFile("workspace_templates/SOUL.md");
-const OPENCLAW_TOOLS_TEMPLATE = @embedFile("workspace_templates/TOOLS.md");
-const OPENCLAW_IDENTITY_TEMPLATE = @embedFile("workspace_templates/IDENTITY.md");
-const OPENCLAW_USER_TEMPLATE = @embedFile("workspace_templates/USER.md");
-const OPENCLAW_HEARTBEAT_TEMPLATE = @embedFile("workspace_templates/HEARTBEAT.md");
-const OPENCLAW_BOOTSTRAP_TEMPLATE = @embedFile("workspace_templates/BOOTSTRAP.md");
-const LEGACY_IDENTITY_AVATAR_HINT = "avatars/openclaw.png";
-const CURRENT_IDENTITY_AVATAR_HINT = "avatars/nullclaw.png";
-
+const WORKSPACE_AGENTS_TEMPLATE = @embedFile("workspace_templates/AGENTS.md");
+const WORKSPACE_SOUL_TEMPLATE = @embedFile("workspace_templates/SOUL.md");
+const WORKSPACE_TOOLS_TEMPLATE = @embedFile("workspace_templates/TOOLS.md");
+const WORKSPACE_IDENTITY_TEMPLATE = @embedFile("workspace_templates/IDENTITY.md");
+const WORKSPACE_USER_TEMPLATE = @embedFile("workspace_templates/USER.md");
+const WORKSPACE_HEARTBEAT_TEMPLATE = @embedFile("workspace_templates/HEARTBEAT.md");
+const WORKSPACE_BOOTSTRAP_TEMPLATE = @embedFile("workspace_templates/BOOTSTRAP.md");
 // ── Project context ──────────────────────────────────────────────
 
 pub const ProjectContext = struct {
@@ -1565,7 +1562,6 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_dir: []const u8
     const identity_tmpl = try identityTemplate(allocator, ctx);
     defer allocator.free(identity_tmpl);
     try writeIfMissing(allocator, workspace_dir, "IDENTITY.md", identity_tmpl);
-    try migrateLegacyIdentityAvatarHint(allocator, workspace_dir);
 
     // USER.md (user profile — loaded by prompt.zig)
     const user_tmpl = try userTemplate(allocator, ctx);
@@ -1575,7 +1571,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_dir: []const u8
     // HEARTBEAT.md (periodic tasks — loaded by prompt.zig)
     try writeIfMissing(allocator, workspace_dir, "HEARTBEAT.md", heartbeatTemplate());
 
-    // BOOTSTRAP.md lifecycle matches OpenClaw semantics:
+    // BOOTSTRAP.md lifecycle:
     // one-shot onboarding instructions with persisted state marker.
     try ensureBootstrapLifecycle(allocator, workspace_dir, identity_tmpl, user_tmpl);
 
@@ -1607,40 +1603,6 @@ fn writeIfMissing(allocator: std.mem.Allocator, dir: []const u8, filename: []con
     };
     defer file.close();
     try file.writeAll(content);
-}
-
-fn migrateLegacyIdentityAvatarHint(allocator: std.mem.Allocator, workspace_dir: []const u8) !void {
-    comptime {
-        if (LEGACY_IDENTITY_AVATAR_HINT.len != CURRENT_IDENTITY_AVATAR_HINT.len) {
-            @compileError("identity avatar migration expects equal replacement lengths");
-        }
-    }
-
-    const identity_path = try std.fmt.allocPrint(allocator, "{s}/IDENTITY.md", .{workspace_dir});
-    defer allocator.free(identity_path);
-
-    const content = try readFileIfPresent(allocator, identity_path, 1024 * 1024) orelse return;
-    defer allocator.free(content);
-
-    var replaced = try allocator.dupe(u8, content);
-    defer allocator.free(replaced);
-
-    var changed = false;
-    var cursor: usize = 0;
-    while (std.mem.indexOf(u8, replaced[cursor..], LEGACY_IDENTITY_AVATAR_HINT)) |rel| {
-        const start = cursor + rel;
-        @memcpy(
-            replaced[start .. start + CURRENT_IDENTITY_AVATAR_HINT.len],
-            CURRENT_IDENTITY_AVATAR_HINT,
-        );
-        cursor = start + CURRENT_IDENTITY_AVATAR_HINT.len;
-        changed = true;
-    }
-    if (!changed) return;
-
-    const file = try std.fs.createFileAbsolute(identity_path, .{});
-    defer file.close();
-    try file.writeAll(replaced);
 }
 
 fn ensureBootstrapLifecycle(
@@ -1889,33 +1851,33 @@ fn memoryTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]c
 
 fn soulTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
     _ = ctx;
-    return allocator.dupe(u8, OPENCLAW_SOUL_TEMPLATE);
+    return allocator.dupe(u8, WORKSPACE_SOUL_TEMPLATE);
 }
 
 fn agentsTemplate() []const u8 {
-    return OPENCLAW_AGENTS_TEMPLATE;
+    return WORKSPACE_AGENTS_TEMPLATE;
 }
 
 fn toolsTemplate() []const u8 {
-    return OPENCLAW_TOOLS_TEMPLATE;
+    return WORKSPACE_TOOLS_TEMPLATE;
 }
 
 fn identityTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
     _ = ctx;
-    return allocator.dupe(u8, OPENCLAW_IDENTITY_TEMPLATE);
+    return allocator.dupe(u8, WORKSPACE_IDENTITY_TEMPLATE);
 }
 
 fn userTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![]const u8 {
     _ = ctx;
-    return allocator.dupe(u8, OPENCLAW_USER_TEMPLATE);
+    return allocator.dupe(u8, WORKSPACE_USER_TEMPLATE);
 }
 
 fn heartbeatTemplate() []const u8 {
-    return OPENCLAW_HEARTBEAT_TEMPLATE;
+    return WORKSPACE_HEARTBEAT_TEMPLATE;
 }
 
 fn bootstrapTemplate() []const u8 {
-    return OPENCLAW_BOOTSTRAP_TEMPLATE;
+    return WORKSPACE_BOOTSTRAP_TEMPLATE;
 }
 
 // ── Memory backend helpers ───────────────────────────────────────
@@ -2132,34 +2094,6 @@ test "scaffoldWorkspace is idempotent" {
     try scaffoldWorkspace(std.testing.allocator, base, &ctx);
     // Running again should not fail
     try scaffoldWorkspace(std.testing.allocator, base, &ctx);
-}
-
-test "scaffoldWorkspace migrates legacy identity avatar hint" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
-
-    {
-        const file = try tmp.dir.createFile("IDENTITY.md", .{});
-        defer file.close();
-        try file.writeAll(
-            \\# IDENTITY.md
-            \\
-            \\- Avatar: avatars/openclaw.png
-            \\
-        );
-    }
-
-    try scaffoldWorkspace(std.testing.allocator, base, &ProjectContext{});
-
-    const file = try tmp.dir.openFile("IDENTITY.md", .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
-    defer std.testing.allocator.free(content);
-    try std.testing.expect(std.mem.indexOf(u8, content, "avatars/openclaw.png") == null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "avatars/nullclaw.png") != null);
 }
 
 test "scaffoldWorkspace seeds bootstrap marker for new workspace" {
@@ -2530,35 +2464,6 @@ test "heartbeatTemplate is non-empty" {
 test "bootstrapTemplate is non-empty" {
     const tmpl = bootstrapTemplate();
     try std.testing.expect(std.mem.indexOf(u8, tmpl, "BOOTSTRAP.md - Hello, World") != null);
-}
-
-test "workspace templates avoid OpenClaw branding in user-facing text" {
-    const allocator = std.testing.allocator;
-    const ctx = ProjectContext{};
-
-    const soul = try soulTemplate(allocator, &ctx);
-    defer allocator.free(soul);
-    const identity = try identityTemplate(allocator, &ctx);
-    defer allocator.free(identity);
-    const user = try userTemplate(allocator, &ctx);
-    defer allocator.free(user);
-    const memory = try memoryTemplate(allocator, &ctx);
-    defer allocator.free(memory);
-
-    const templates = [_][]const u8{
-        agentsTemplate(),
-        toolsTemplate(),
-        heartbeatTemplate(),
-        bootstrapTemplate(),
-        soul,
-        identity,
-        user,
-        memory,
-    };
-
-    for (templates) |tmpl| {
-        try std.testing.expect(std.ascii.indexOfIgnoreCase(tmpl, "openclaw") == null);
-    }
 }
 
 test "scaffoldWorkspace creates all prompt.zig files" {

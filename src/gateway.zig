@@ -19,6 +19,7 @@ const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
 const tools_mod = @import("tools/root.zig");
 const memory_mod = @import("memory/root.zig");
+const subagent_mod = @import("subagent.zig");
 const observability = @import("observability.zig");
 const agent_routing = @import("agent_routing.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
@@ -2100,6 +2101,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     var session_mgr_opt: ?session_mod.SessionManager = null;
     var tools_slice: []const tools_mod.Tool = &.{};
     var mem_rt: ?memory_mod.MemoryRuntime = null;
+    var subagent_manager_opt: ?*subagent_mod.SubagentManager = null;
     var noop_obs_gateway = observability.NoopObserver{};
     const needs_local_agent = event_bus == null;
 
@@ -2156,6 +2158,12 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 // Optional memory backend.
                 mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);
 
+                const subagent_manager = allocator.create(subagent_mod.SubagentManager) catch null;
+                if (subagent_manager) |mgr| {
+                    mgr.* = subagent_mod.SubagentManager.init(allocator, cfg, event_bus, .{});
+                    subagent_manager_opt = mgr;
+                }
+
                 // Tools.
                 tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
                     .http_enabled = cfg.http_request.enabled,
@@ -2163,6 +2171,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     .screenshot_enabled = true,
                     .agents = cfg.agents,
                     .fallback_api_key = resolved_api_key,
+                    .subagent_manager = subagent_manager_opt,
                 }) catch &.{};
 
                 const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
@@ -2180,6 +2189,10 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     }
     defer if (provider_bundle_opt) |*bundle| bundle.deinit();
     defer if (mem_rt) |*rt| rt.deinit();
+    defer if (subagent_manager_opt) |mgr| {
+        mgr.deinit();
+        allocator.destroy(mgr);
+    };
     defer if (tools_slice.len > 0) tools_mod.deinitTools(allocator, tools_slice);
     defer if (session_mgr_opt) |*sm| sm.deinit();
 

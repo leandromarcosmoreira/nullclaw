@@ -140,7 +140,7 @@ fn buildIdentitySection(
         try injectWorkspaceFile(allocator, w, workspace_dir, filename);
     }
 
-    // Match OpenClaw behavior: inject MEMORY.md if present, otherwise fallback to memory.md.
+    // Inject MEMORY.md if present, otherwise fallback to memory.md.
     try injectPreferredMemoryFile(allocator, w, workspace_dir);
 }
 

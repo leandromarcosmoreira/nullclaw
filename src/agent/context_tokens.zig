@@ -1,6 +1,6 @@
 //! Context-token resolution for agent compaction.
 //!
-//! Follows OpenClaw-style fallback chain:
+//! Follows the runtime fallback chain:
 //!   1) explicit config override
 //!   2) best-effort lookup by model id
 //!   3) default fallback
@@ -40,7 +40,7 @@ const MODEL_WINDOWS = [_]ContextWindowEntry{
     .{ .key = "mixtral-8x7b-32768", .tokens = 32_768 },
 };
 
-// Provider-level fallbacks aligned with OpenClaw provider defaults where available.
+// Provider-level fallbacks aligned with current runtime defaults where available.
 const PROVIDER_WINDOWS = [_]ContextWindowEntry{
     .{ .key = "openrouter", .tokens = 200_000 },
     .{ .key = "minimax", .tokens = 200_000 },

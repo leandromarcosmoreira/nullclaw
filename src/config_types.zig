@@ -1,10 +1,10 @@
 const std = @import("std");
 
 /// Default context token budget used by agent compaction/context management.
-/// Kept aligned with OpenClaw fallback (`DEFAULT_CONTEXT_TOKENS`).
+/// Runtime fallback (`DEFAULT_CONTEXT_TOKENS`).
 pub const DEFAULT_AGENT_TOKEN_LIMIT: u64 = 200_000;
 /// Default generation cap when model/provider metadata does not define max output.
-/// Kept aligned with OpenClaw's `DEFAULT_MODEL_MAX_TOKENS`.
+/// Runtime fallback (`DEFAULT_MODEL_MAX_TOKENS`).
 pub const DEFAULT_MODEL_MAX_TOKENS: u32 = 8192;
 
 // ── Autonomy Level ──────────────────────────────────────────────
@@ -773,7 +773,7 @@ pub const HttpRequestConfig = struct {
 // ── Identity config ─────────────────────────────────────────────
 
 pub const IdentityConfig = struct {
-    format: []const u8 = "openclaw",
+    format: []const u8 = "nullclaw",
     aieos_path: ?[]const u8 = null,
     aieos_inline: ?[]const u8 = null,
 };

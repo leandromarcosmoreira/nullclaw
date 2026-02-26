@@ -705,6 +705,34 @@ test "all tools excludes extras when disabled" {
     try std.testing.expectEqual(@as(usize, 13), tools.len);
 }
 
+test "all tools wires subagent manager into spawn tool" {
+    const Config = @import("../config.zig").Config;
+    const subagent_mod = @import("../subagent.zig");
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc_test",
+        .config_path = "/tmp/yc_test/config.json",
+        .allocator = std.testing.allocator,
+    };
+    var manager = subagent_mod.SubagentManager.init(std.testing.allocator, &cfg, null, .{});
+    defer manager.deinit();
+
+    const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{
+        .subagent_manager = &manager,
+    });
+    defer deinitTools(std.testing.allocator, tools);
+
+    var checked_spawn = false;
+    for (tools) |t| {
+        if (!std.mem.eql(u8, t.name(), "spawn")) continue;
+        const spawn_tool: *spawn.SpawnTool = @ptrCast(@alignCast(t.ptr));
+        try std.testing.expect(spawn_tool.manager == &manager);
+        checked_spawn = true;
+        break;
+    }
+    try std.testing.expect(checked_spawn);
+}
+
 test "bindMemoryTools matches by vtable, not by colliding tool name" {
     const FakeCollidingTool = struct {
         sentinel: usize = 0xDEADBEEF,

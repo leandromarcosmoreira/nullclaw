@@ -1501,6 +1501,9 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .tracker = &tracker,
     };
 
+    var subagent_manager = yc.subagent.SubagentManager.init(allocator, config, null, .{});
+    defer subagent_manager.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1512,6 +1515,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .tools_config = config.tools,
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
+        .subagent_manager = &subagent_manager,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
@@ -1788,6 +1792,9 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .tracker = &tracker,
     };
 
+    var subagent_manager = yc.subagent.SubagentManager.init(allocator, &config, null, .{});
+    defer subagent_manager.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1799,6 +1806,7 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .tools_config = config.tools,
         .allowed_paths = config.autonomy.allowed_paths,
         .policy = &sec_policy,
+        .subagent_manager = &subagent_manager,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 

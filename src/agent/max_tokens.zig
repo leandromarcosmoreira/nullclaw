@@ -1,6 +1,6 @@
 //! Max-token resolution for generation limits.
 //!
-//! Follows OpenClaw-style fallback chain:
+//! Follows the runtime fallback chain:
 //!   1) explicit config override
 //!   2) best-effort lookup by model/provider id
 //!   3) default fallback
@@ -40,7 +40,7 @@ const MODEL_MAX_TOKENS = [_]MaxTokensEntry{
     .{ .key = "k2p5", .tokens = 32_768 },
 };
 
-// Provider-level fallbacks aligned with OpenClaw provider defaults.
+// Provider-level fallbacks aligned with current runtime defaults.
 const PROVIDER_MAX_TOKENS = [_]MaxTokensEntry{
     .{ .key = "anthropic", .tokens = 8192 },
     .{ .key = "openai", .tokens = 8192 },

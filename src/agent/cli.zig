@@ -15,6 +15,7 @@ const Memory = memory_mod.Memory;
 const observability = @import("../observability.zig");
 const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
+const subagent_mod = @import("../subagent.zig");
 const cli_mod = @import("../channels/cli.zig");
 const security = @import("../security/policy.zig");
 const onboard = @import("../onboard.zig");
@@ -45,7 +46,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         return;
     };
 
-    // Match OpenClaw lifecycle: seed workspace files on first agent run
+    // Ensure lifecycle parity: seed workspace files on first agent run
     // so prompts always have the expected bootstrap context.
     try onboard.scaffoldWorkspace(allocator, cfg.workspace_dir, &onboard.ProjectContext{});
 
@@ -112,6 +113,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer runtime_provider.deinit();
     const resolved_api_key = runtime_provider.primaryApiKey();
 
+    var subagent_manager = subagent_mod.SubagentManager.init(allocator, &cfg, null, .{});
+    defer subagent_manager.deinit();
+
     // Create tools (with agents config for delegate depth enforcement)
     const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
         .http_enabled = cfg.http_request.enabled,
@@ -122,6 +126,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .tools_config = cfg.tools,
         .allowed_paths = cfg.autonomy.allowed_paths,
         .policy = &policy,
+        .subagent_manager = &subagent_manager,
     });
     defer tools_mod.deinitTools(allocator, tools);
 

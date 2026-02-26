@@ -16,6 +16,7 @@ const mcp = @import("mcp.zig");
 const voice = @import("voice.zig");
 const health = @import("health.zig");
 const daemon = @import("daemon.zig");
+const subagent_mod = @import("subagent.zig");
 const agent_routing = @import("agent_routing.zig");
 const provider_runtime = @import("providers/runtime_bundle.zig");
 
@@ -73,6 +74,7 @@ pub const ChannelRuntime = struct {
     tools: []const tools_mod.Tool,
     mem_rt: ?memory_mod.MemoryRuntime,
     noop_obs: *observability.NoopObserver,
+    subagent_manager: ?*subagent_mod.SubagentManager,
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
     pub fn init(allocator: std.mem.Allocator, config: *const Config) !*ChannelRuntime {
@@ -92,6 +94,15 @@ pub const ChannelRuntime = struct {
             null;
         defer if (mcp_tools) |mt| allocator.free(mt);
 
+        const subagent_manager = allocator.create(subagent_mod.SubagentManager) catch null;
+        errdefer if (subagent_manager) |mgr| allocator.destroy(mgr);
+        if (subagent_manager) |mgr| {
+            mgr.* = subagent_mod.SubagentManager.init(allocator, config, null, .{});
+            errdefer {
+                mgr.deinit();
+            }
+        }
+
         // Tools
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
@@ -101,6 +112,7 @@ pub const ChannelRuntime = struct {
             .agents = config.agents,
             .fallback_api_key = resolved_key,
             .tools_config = config.tools,
+            .subagent_manager = subagent_manager,
         }) catch &.{};
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 
@@ -128,6 +140,7 @@ pub const ChannelRuntime = struct {
             .tools = tools,
             .mem_rt = mem_rt,
             .noop_obs = noop_obs,
+            .subagent_manager = subagent_manager,
         };
         // Wire MemoryRuntime pointer into SessionManager for /doctor diagnostics
         // and into memory tools for retrieval pipeline + vector sync.
@@ -143,6 +156,10 @@ pub const ChannelRuntime = struct {
         const alloc = self.allocator;
         self.session_mgr.deinit();
         if (self.tools.len > 0) tools_mod.deinitTools(alloc, self.tools);
+        if (self.subagent_manager) |mgr| {
+            mgr.deinit();
+            alloc.destroy(mgr);
+        }
         if (self.mem_rt) |*rt| rt.deinit();
         self.provider_bundle.deinit();
         alloc.destroy(self.noop_obs);

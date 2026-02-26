@@ -660,7 +660,7 @@ fn inboundDispatcherThread(
 /// shutdown is requested (Ctrl+C signal or explicit request).
 /// `host` and `port` are CLI-parsed values that override `config.gateway`.
 pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16) !void {
-    // Match OpenClaw lifecycle: ensure workspace bootstrap files exist
+    // Ensure lifecycle parity: workspace bootstrap files must exist
     // even when users skip onboard and start runtime directly.
     try onboard.scaffoldWorkspace(allocator, config.workspace_dir, &onboard.ProjectContext{});
 

@@ -2725,7 +2725,7 @@ test "json parse reasoning_effort low" {
     allocator.free(cfg.reasoning_effort.?);
 }
 
-test "unknown openclaw fields silently ignored" {
+test "unknown foreign fields silently ignored" {
     const allocator = std.testing.allocator;
     const json =
         \\{"models": {"bedrock_discovery": true, "providers": {}}, "tts": {"enabled": true}, "session": {}, "ui": {}, "skills": []}

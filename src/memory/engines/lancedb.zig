@@ -1,6 +1,6 @@
 //! LanceDB-style vector memory backend — SQLite + embedding-based store/recall.
 //!
-//! Inspired by OpenClaw's LanceDB extension: combines SQLite for storage
+//! Combines SQLite for storage
 //! with cosine similarity search for vector-augmented recall. Features:
 //!
 //! - Duplicate detection: skip entries with >95% cosine similarity
