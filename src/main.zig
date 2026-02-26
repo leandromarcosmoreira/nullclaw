@@ -1606,7 +1606,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
                     else => "An error occurred. Try again or /new for a fresh session.",
                 };
                 if (msg.reply_target) |target| {
-                    sg.sendMessage(target, err_msg) catch |send_err| std.debug.print("  Send error: {}\n", .{send_err});
+                    sg.sendMessage(target, err_msg, &.{}) catch |send_err| std.debug.print("  Send error: {}\n", .{send_err});
                 }
                 continue;
             };
@@ -1616,7 +1616,7 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
 
             // Reply on Signal; handles split
             if (msg.reply_target) |target| {
-                sg.sendMessage(target, reply) catch |err| {
+                sg.sendMessage(target, reply, &.{}) catch |err| {
                     std.debug.print("  Send error: {}\n", .{err});
                 };
             }
